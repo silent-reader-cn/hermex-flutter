@@ -100,8 +100,11 @@ class _CollapsibleProcessCapsuleState extends State<CollapsibleProcessCapsule> {
       key: const ValueKey('collapsible-process-capsule'),
       width: double.infinity,
       child: Padding(
-        // 左缘让出 17px 给轨线（rail 5px 居中于 0-10 区），内容整体缩进。
-        padding: const EdgeInsets.only(left: 17),
+        // 左缘让出 11px 给轨线（rail 5px 居中于 0-10 区），内容整体缩进。
+        // #67 对齐修正：17→11，使空心蓝节点左缘（12+11+1.5≈24.5）与展开后
+        // 工具卡组卡绿勾左缘（12+10+2.5≈24.5）垂直对齐——真机反馈两者图标
+        // 错位（节点比卡图标缩进多 6px）。
+        padding: const EdgeInsets.only(left: 11),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -165,9 +168,7 @@ class _CollapsibleProcessCapsuleState extends State<CollapsibleProcessCapsule> {
                                     trailingDuration,
                                     style: TextStyle(
                                       fontSize: 11,
-                                      color: secondaryText.resolveFrom(
-                                        context,
-                                      ),
+                                      color: secondaryText.resolveFrom(context),
                                     ),
                                   ),
                                   const SizedBox(width: 6),
@@ -278,10 +279,7 @@ class _RailBody extends StatelessWidget {
           child: Container(
             width: 3,
             height: 3,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: nodeColor,
-            ),
+            decoration: BoxDecoration(shape: BoxShape.circle, color: nodeColor),
           ),
         ),
         Padding(
@@ -343,9 +341,7 @@ String formatProcessCapsuleSummary({
 
   // #64 方案 E 前缀：「过程 · 执行代码×8 …」；宽度不足时前缀优先保留、
   // 明细退省略号（前缀 + 首项仍放不下时由渲染层 ellipsis 兜底）。
-  final prefix = processPrefix
-      ? '${l10n.turn55ProcessLabel} \u00B7 '
-      : '';
+  final prefix = processPrefix ? '${l10n.turn55ProcessLabel} \u00B7 ' : '';
 
   final entries = counts.entries.toList()
     ..sort((a, b) {
