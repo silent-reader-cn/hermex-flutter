@@ -1579,6 +1579,21 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
     final liveTimeline = ref.watch(liveTimelineProvider(sessionId));
     final toolGroups = ref.watch(toolGroupsProvider(sessionId));
     final phase = ref.watch(chatPhaseProvider(sessionId));
+    // #70 折叠误闪门控：live 会话刷新时「回合是否完成」存在两个误判窗口——
+    // ① 缓存回放态（isViewingCachedData）：网络未回先铺缓存，phase=idle、
+    //    activeStreamId=null，缓存里进行中的最后回合被当已完成 → 胶囊闪现，
+    //    网络恢复带回流信息后又消失（主人实机所见「刷新闪现、过会没了」）；
+    // ② 流仍活跃但相位非 streaming（recovering/steered 等）：phase/streaming
+    //    两项判定漏放行。
+    // 门控 = 流权威信号（activeStreamId）+ 缓存回放态双保险：流状态未确认
+    // 前，最后回合一律不算完成、不折叠。
+    final hasActiveStream = ref.watch(
+      chatControllerProvider(sessionId)
+          .select((s) => s.stream.activeStreamId != null),
+    );
+    final isViewingCachedData = ref.watch(
+      chatControllerProvider(sessionId).select((s) => s.isViewingCachedData),
+    );
     final queuedMessages = ref.watch(
       chatControllerProvider(sessionId).select((s) => s.queuedSlashMessages),
     );
@@ -1780,6 +1795,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
       final isTurnCompleted =
           !isLastTurn ||
           (streaming == null &&
+              !hasActiveStream &&
+              !isViewingCachedData &&
               phase != ChatPhase.streaming &&
               phase != ChatPhase.sending);
 

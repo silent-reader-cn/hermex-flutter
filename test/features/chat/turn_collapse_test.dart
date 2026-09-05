@@ -1,6 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hermes_ui/core/api/api_exception.dart';
+import 'package:hermes_ui/core/cache/app_database.dart';
+import 'package:hermes_ui/core/cache/cache_providers.dart';
+import 'package:hermes_ui/core/cache/cache_service.dart';
 import 'package:hermes_ui/core/models/server_catalog.dart';
 import 'package:hermes_ui/features/chat/chat_page.dart';
 import 'package:hermes_ui/features/chat/chat_providers.dart';
@@ -19,6 +25,8 @@ void main() {
     bool coalesceTools = false,
     bool hideThinking = false,
     FakeChatApi? customApi,
+    List<Override>? extraOverrides,
+    bool skipSessionResult = false,
   }) async {
     tester.view.physicalSize = const Size(1280, 1600);
     tester.view.devicePixelRatio = 1.0;
@@ -32,11 +40,13 @@ void main() {
     });
 
     final api = customApi ?? FakeChatApi();
-    api.sessionResult = {'session': sessionData};
+    if (!skipSessionResult) {
+      api.sessionResult = {'session': sessionData};
+    }
 
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [chatApiProvider.overrideWithValue(api)],
+        overrides: [chatApiProvider.overrideWithValue(api), ...?extraOverrides],
         child: CupertinoApp(
           home: ChatPage(sessionId: sessionData['session_id'] as String),
         ),
@@ -142,21 +152,11 @@ void main() {
           .getTopLeft(find.byKey(const ValueKey('collapsible-process-capsule')))
           .dy;
       final userDy = tester.getTopLeft(find.text('帮我审查代码')).dy;
-      final finalDy = tester
-          .getTopLeft(find.text('这是最终的审查报告，一切正常。'))
-          .dy;
+      final finalDy = tester.getTopLeft(find.text('这是最终的审查报告，一切正常。')).dy;
 
       // #58 改判（推翻 #55「胶囊钉回合最上方」）：提问 → 胶囊 → 最终答复
-      expect(
-        capsuleDy,
-        greaterThan(userDy),
-        reason: '#58 胶囊应在用户气泡下方',
-      );
-      expect(
-        capsuleDy,
-        lessThan(finalDy),
-        reason: '#58 胶囊应在最终答复上方',
-      );
+      expect(capsuleDy, greaterThan(userDy), reason: '#58 胶囊应在用户气泡下方');
+      expect(capsuleDy, lessThan(finalDy), reason: '#58 胶囊应在最终答复上方');
     });
 
     testWidgets('2. 点胶囊展开与再次收起：展开后符合 #54 时间线语义，再次点击回到折叠态', (tester) async {
@@ -380,6 +380,61 @@ void main() {
 
       // 滚动后状态依然保持展开记忆
       expect(find.text('收到，首先检查整体架构。'), findsOneWidget);
+    });
+
+    testWidgets('8. #70 缓存回放态（网络未回先铺缓存）：最后回合不闪折叠胶囊', (tester) async {
+      // 预置离线缓存：一个带工具的完整回合（与用例 1 同形状）。
+      final db = AppDatabase.memory();
+      addTearDown(db.close);
+      final cacheService = CacheService(db);
+      unawaited(
+        cacheService.writeMessages(
+          sessionId: 's-cache-flash',
+          messages: [
+            {'id': 'u1', 'role': 'user', 'content': '帮我审查代码', '_ts': 1000.0},
+            {
+              'id': 'a1',
+              'role': 'assistant',
+              'content': '收到，首先检查整体架构。',
+              'tool_calls': [
+                {
+                  'id': 'call_1',
+                  'call_id': 'call_1',
+                  'type': 'function',
+                  'function': {
+                    'name': 'read_file',
+                    'arguments': '{"path": "lib/main.dart"}',
+                  },
+                },
+              ],
+              '_ts': 1001.0,
+            },
+            {
+              'id': 'a2',
+              'role': 'assistant',
+              'content': '这是最终的审查报告，一切正常。',
+              '_ts': 1002.0,
+            },
+          ],
+        ),
+      );
+      await pumpTurnSession(
+        tester,
+        sessionData: const {'session_id': 's-cache-flash'},
+        skipSessionResult: true,
+        extraOverrides: [
+          cacheServiceProvider.overrideWithValue(cacheService),
+          appDatabaseProvider.overrideWithValue(db),
+        ],
+        customApi: FakeChatApi()
+          ..sessionError = NetworkException(NetworkExceptionKind.cannotConnect),
+      );
+      await tester.pumpAndSettle();
+
+      // 缓存消息已渲染（回放态），但流状态未知 → 最后回合不折叠、无胶囊。
+      expect(find.text('帮我审查代码'), findsOneWidget);
+      expect(find.text('这是最终的审查报告，一切正常。'), findsOneWidget);
+      expect(find.byType(CollapsibleProcessCapsule), findsNothing);
     });
   });
 }
