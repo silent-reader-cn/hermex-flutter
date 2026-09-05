@@ -77,7 +77,7 @@ class DownloadController extends Notifier<DownloadState> {
   late final DownloadRepository _repository;
   late final DownloadSaveService _saveService;
   late final TurnNotificationService _notificationService;
-  late final Future<Uint8List> Function(Uri) _downloader;
+  late final DownloadBytesDownloader _downloader;
 
   bool _isWorkerRunning = false;
   bool _isInitialized = false;
@@ -423,7 +423,35 @@ class DownloadController extends Notifier<DownloadState> {
             }
           } else {
             final uri = Uri.parse(currentTask.sourceUrl);
-            bytes = await _downloader(uri);
+            // #69 真实进度回传：dio onReceiveProgress → 任务 receivedBytes，
+            // 节流 ≥100ms 或 ≥1% 增量才刷 state（防高频重建）；total>0 且任务
+            // 无 expectedBytes 时顺带补齐分母。
+            var lastProgressAt = DateTime.fromMillisecondsSinceEpoch(0);
+            var lastReceived = 0;
+            bytes = await _downloader(
+              uri,
+              onProgress: (received, total) {
+                if (received <= 0) return;
+                final now = DateTime.now();
+                final effectiveTotal = total > 0
+                    ? total
+                    : (currentTask.expectedBytes ?? -1);
+                final timeHit =
+                    now.difference(lastProgressAt).inMilliseconds >= 100;
+                final sizeHit =
+                    effectiveTotal <= 0 ||
+                    (received - lastReceived) * 100 >= effectiveTotal;
+                if (!timeHit && !sizeHit && received < effectiveTotal) return;
+                lastProgressAt = now;
+                lastReceived = received;
+                final progressed = currentTask.copyWith(
+                  status: DownloadStatus.downloading,
+                  receivedBytes: received,
+                  expectedBytes: effectiveTotal > 0 ? effectiveTotal : null,
+                );
+                _updateTask(progressed);
+              },
+            );
           }
 
           if (_cancelledTaskIds.contains(currentTask.id)) {

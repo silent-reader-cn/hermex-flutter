@@ -11,11 +11,13 @@ List<ChatMessage> diffMergeMessages({
   required List<ChatMessage> serverMessages,
 }) {
   if (localMessages.isEmpty) {
-    return List<ChatMessage>.of(serverMessages);
+    return _dedupeServerUserMessages(serverMessages);
   }
   if (serverMessages.isEmpty) {
     return List<ChatMessage>.of(localMessages);
   }
+
+  serverMessages = _dedupeServerUserMessages(serverMessages);
 
   final matchedLocalIndices = <int>{};
   final serverToLocal = <int, int>{};
@@ -105,6 +107,56 @@ List<ChatMessage> diffMergeMessages({
     }
   }
 
+  return result;
+}
+
+/// 服务端 user 行自去重（真机双气泡 #67）：
+///
+/// webui 上游在同一回合可能落两条 user 行——一条解析版（带权威 id、
+/// `[Workspace::v1]`/`[Attached files]`/`[screenshot]` 注入标记已剥离、
+/// 带 attachments 字段），一条注入原文版（无 id、标记全保留），二者
+/// timestamp 完全相同。客户端本地乐观消息只能匹配其中一条，另一条会被
+/// 当「服务端缺失项」补入 → 用户消息双气泡（第二遍为未解析原文）。
+///
+/// 去重规则：相邻 user 行若 timestamp 相同（±0.5s 容差）且归一化内容
+/// 相等，仅保留一条——优先保留带权威 id 的解析版。
+List<ChatMessage> _dedupeServerUserMessages(List<ChatMessage> serverMessages) {
+  bool hasAuthoritativeId(ChatMessage m) {
+    final id = m.messageId;
+    return id != null && id.isNotEmpty && !_isTempId(id);
+  }
+
+  final result = <ChatMessage>[];
+  for (final msg in serverMessages) {
+    if (msg.role == 'user' && result.isNotEmpty) {
+      final prev = result.last;
+      if (prev.role == 'user') {
+        final prevTs = prev.timestamp;
+        final curTs = msg.timestamp;
+        final sameTs =
+            prevTs != null &&
+            curTs != null &&
+            prevTs > 0 &&
+            curTs > 0 &&
+            (prevTs - curTs).abs() <= 0.5;
+        if (sameTs) {
+          final normPrev = _normalizeUserContent(prev.content ?? '');
+          final normCur = _normalizeUserContent(msg.content ?? '');
+          if (normPrev == normCur) {
+            // 同一条消息的两个投影：保留带权威 id 的一条。
+            if (hasAuthoritativeId(prev)) {
+              continue; // 丢弃当前无权威 id 行
+            }
+            if (hasAuthoritativeId(msg)) {
+              result[result.length - 1] = msg; // 替换为权威行
+            }
+            continue;
+          }
+        }
+      }
+    }
+    result.add(msg);
+  }
   return result;
 }
 
