@@ -7,7 +7,7 @@
 
 ---
 
-（空——#56-#63 已全部收口誊写至 `.todo/20260905.md`，待新任务）
+（#56-#63 已全部收口誊写至 `.todo/20260905.md`；#64 胶囊方案 E 已收口至 `.todo/20260905.md`）
 
 ---
 
@@ -29,11 +29,39 @@
 
 ---
 
+### #67 [P1→已修复待真机复验] 用户消息双气泡复发：服务端同回合落两条 user 投影行
+- 位置：`lib/features/chat/chat_diff_merge.dart`（新增 `_dedupeServerUserMessages` 预处理）
+- 复现：WebUI 发带附件消息 → Flutter 客户端该回合用户消息出现两条气泡，第一条正常、第二条为未解析注入原文
+- 根因（实证 会话 4dea67e97b65）：**非发送侧问题**——state.db 权威库只有一条（id 165170）；webui session JSON 同 timestamp（1788605380.6545517 完全相等）写两条 user 行：idx137 解析版（带 id=141+attachments+`_db_persisted`，注入标记已剥）+ idx138 注入原文版（无 id）。客户端乐观消息只能匹配一条，另一条被当缺失项补入 → 双气泡。#61 归一化匹配本身命中 idx137，漏的是**服务端自身双投影**这一新形态
+- 修复：diff-merge 入口对 serverMessages 预处理——相邻 user 行 ts 相同（±0.5s）且归一化内容相等 → 仅保留带权威 id 的一条（权威行在前在后都保留它）
+- 验收：回归测试 chat_diff_merge_user_injection_test 新增 5 例（RED 复现/local 空/不误伤异内容/不误伤 >0.5s 连发/权威行顺序无关）全绿；真机复验双气泡消失
 
 ---
 
+### #68 [P2→已修复待真机复验] 回合折叠胶囊左缩进比工具卡大，图标不对齐
+- 位置：`lib/features/chat/widgets/collapsible_process_capsule.dart` header `EdgeInsets.only(left:)`
+- 复现：展开回合胶囊 → 胶囊「过程 ·」行的空心蓝节点 与 内部工具卡组卡绿勾 左缘不齐，节点明显更靠右（截图目测差 ~6 逻辑px）
+- 根因（像素实测 DPR=3）：绿勾左缘 = 列表 pad 12 + 卡内 pad 10 + Icon 内缩 ≈ 24.5；节点左缘 = 12 + header pad 17 + (10-7)/2 = 28.5 → 差 6px
+- 修复：header left padding 17→11，节点左缘 12+11+1.5=24.5 与绿勾对齐（轨线 rail 仍在 0-10 区不冲突）
+- 验收：真机看展开态节点与卡图标垂直对齐；金照若受影响 `--update-goldens`
+
 ---
 
+### #69 [P1→已修复待真机复验] 下载列表进度恒 0%→直接 100%，无中间过程
+- 位置：`lib/core/api/api_client.dart` `downloadData`/`_fetchWithRedirects`/`_buildOptions` + `lib/features/downloads/download_providers.dart` `downloadDownloaderProvider` + `lib/features/downloads/download_controller.dart` worker 下载分支
+- 复现：下载较大文件（如 apk）→ 下载页任务进度条一直 0%，最后瞬间跳 100%（或直接失败）
+- 根因：dio `ResponseType.bytes` 全量缓冲到内存才返回，执行器 `downloadData` 从未传 `onReceiveProgress`，控制器等 `await` 完成才一次性置 completed → `receivedBytes` 全程 0
+- 修复：`downloadData` 增 `onReceiveProgress` 参数透传至 `RequestOptions`；`downloadDownloaderProvider` 签名改 typedef `DownloadBytesDownloader`（带可选 `onProgress`）；controller 下载分支回调里节流（≥100ms 或 ≥1% 增量）刷 `receivedBytes`/`expectedBytes`（total>0 顺带补分母）；4 个测试注入点 lambda 同步
+- 验收：回归测试 download_controller_test 新增 2 例（中途回调刷 50%+downloading/total 未知仍刷 receivedBytes）；真机下载大文件看进度条平滑推进
+
+---
+
+### #70 [P1→已修复待真机复验] live 会话刷新闪现回合折叠胶囊，过一会自动消失
+- 位置：`lib/features/chat/widgets/chat_message_list.dart` `isTurnCompleted` 判定（原 :1780-1784）
+- 复现：会话正在生成（live）→ 下拉刷新/重进 → 最后回合突然变成折叠胶囊 → 数秒后又自动展开消失
+- 根因：`isTurnCompleted` 只看 `streaming==null && phase∉{streaming,sending}`，存在两个误判窗口：① 缓存回放态（网络未回先铺缓存 `isViewingCachedData=true`，phase=idle、activeStreamId=null，缓存里进行中回合被当已完成）；② 流仍活跃但相位非 streaming（recovering/steered 等）
+- 修复：`isTurnCompleted` 追加 `!hasActiveStream && !isViewingCachedData` 双门控（activeStreamId 是流的权威信号；done 收尾会清 activeStreamId → 正常完成后胶囊照常出现，无误伤）
+- 验收：回归测试 turn_collapse_test 新增用例 8（缓存回放态不闪胶囊；stash RED 校验通过）；用例 6（streaming 不折叠）与用例 1（历史完成回合正常折叠）不回归；真机复验 live 刷新不闪
 
 ---
 
