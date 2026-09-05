@@ -34,7 +34,7 @@ class ApiClient {
     this.maxRedirects = 5,
     this.autoReauth,
     this.allowAutoReauth = true,
-  })  : _baseUrl = _normalizeBaseUrl(baseUrl) {
+  }) : _baseUrl = _normalizeBaseUrl(baseUrl) {
     _baseUri = Uri.parse(_baseUrl);
     final scheme = _baseUri.scheme.toLowerCase();
     if (!_baseUri.hasAuthority || (scheme != 'http' && scheme != 'https')) {
@@ -266,6 +266,7 @@ class ApiClient {
     Uri url, {
     bool mapsUnauthorized = false,
     bool allowAutoReauth = true,
+    void Function(int receivedBytes, int totalBytes)? onReceiveProgress,
   }) async {
     final sameOrigin = isSameOriginUri(url, _baseUri);
     final response = await _fetchWithAutoReauth(
@@ -276,6 +277,7 @@ class ApiClient {
         contentType: null,
         timeout: null,
         accept: '*/*',
+        onReceiveProgress: onReceiveProgress,
       ),
       allowAutoReauth: allowAutoReauth && sameOrigin,
     );
@@ -296,6 +298,7 @@ class ApiClient {
     String? contentType,
     Duration? timeout,
     required String accept,
+    void Function(int receivedBytes, int totalBytes)? onReceiveProgress,
   }) async {
     var current = uri;
     var options = _buildOptions(
@@ -305,6 +308,7 @@ class ApiClient {
       contentType: contentType,
       timeout: timeout,
       accept: accept,
+      onReceiveProgress: onReceiveProgress,
     );
     for (var hop = 0; ; hop++) {
       final sameOrigin = isSameOriginUri(current, _baseUri);
@@ -341,6 +345,7 @@ class ApiClient {
     String? contentType,
     Duration? timeout,
     required String accept,
+    void Function(int receivedBytes, int totalBytes)? onReceiveProgress,
   }) {
     final headers = <String, dynamic>{
       'Accept': accept,
@@ -359,6 +364,7 @@ class ApiClient {
       connectTimeout: resolvedTimeout,
       sendTimeout: resolvedTimeout,
       receiveTimeout: resolvedTimeout,
+      onReceiveProgress: onReceiveProgress,
     );
   }
 
@@ -532,8 +538,8 @@ extension ApiClientServer on ApiClient {
   }
 }
 
-Map<String, Object?> _asMap(Object? json) =>
-    json is Map<String, Object?>
-        ? json
-        : (json is Map ? Map<String, Object?>.from(json) : const <String, Object?>{});
-
+Map<String, Object?> _asMap(Object? json) => json is Map<String, Object?>
+    ? json
+    : (json is Map
+          ? Map<String, Object?>.from(json)
+          : const <String, Object?>{});

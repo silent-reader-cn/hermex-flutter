@@ -16,17 +16,17 @@ import 'download_models.dart';
 import 'download_providers.dart';
 
 /// 原生 FileProvider 通道：把绝对路径换成 content:// URI。
-const MethodChannel _fileShareChannel =
-    MethodChannel('com.silentreader.hermes_ui/file_share');
+const MethodChannel _fileShareChannel = MethodChannel(
+  'com.silentreader.hermes_ui/file_share',
+);
 
 /// 经 MainActivity 的 FileProvider MethodChannel 生成 content:// URI。
 /// 失败（通道缺失/异常）返回 null，由调用方兜底。
 Future<String?> _androidContentUriFor(String path) async {
   try {
-    final uri = await _fileShareChannel.invokeMethod<String>(
-      'getShareUri',
-      {'path': path},
-    );
+    final uri = await _fileShareChannel.invokeMethod<String>('getShareUri', {
+      'path': path,
+    });
     return uri;
   } catch (error) {
     DiagnosticsService.instance.log(

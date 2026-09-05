@@ -20,12 +20,17 @@ final downloadRepositoryProvider = Provider<DownloadRepository>((ref) {
   return DownloadRepository(db);
 });
 
+/// 下载执行器签名：可选 [onProgress] 回调（received, total；total=-1 未知）。
+typedef DownloadBytesDownloader = Future<Uint8List> Function(
+  Uri url, {
+  void Function(int receivedBytes, int totalBytes)? onProgress,
+});
+
 /// 下载网络执行器 Provider（默认走激活连接的 ApiClient.downloadData）。
-final downloadDownloaderProvider = Provider<Future<Uint8List> Function(Uri)>((
-  ref,
-) {
+final downloadDownloaderProvider = Provider<DownloadBytesDownloader>((ref) {
   final client = ref.watch(apiClientProvider);
-  return (url) => client.downloadData(url);
+  return (url, {onProgress}) =>
+      client.downloadData(url, onReceiveProgress: onProgress);
 });
 
 /// 下载状态与队列控制器 Provider。

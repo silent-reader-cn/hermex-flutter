@@ -107,7 +107,7 @@ void main() {
         // DownloadController 内部 watch 的远程下载执行器走 apiClientProvider，
         // 无服务器连接会抛「尚未配置服务器连接」——测试注入假执行器。
         downloadDownloaderProvider.overrideWithValue(
-          (uri) async => Uint8List.fromList([]),
+          (uri, {onProgress}) async => Uint8List.fromList([]),
         ),
         if (tasksOverride != null)
           downloadTasksProvider.overrideWithValue(tasksOverride),

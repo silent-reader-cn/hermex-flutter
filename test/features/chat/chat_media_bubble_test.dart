@@ -71,7 +71,7 @@ class _FakeDownloadNotificationService implements TurnNotificationService {
 /// 构造下载链路测试 override（内存 DB + fake 下载器 + fake 通知 + 临时保存目录）。
 List<Override> buildDownloadOverrides({
   Directory? tempDir,
-  Future<Uint8List> Function(Uri)? downloader,
+  DownloadBytesDownloader? downloader,
 }) {
   final db = AppDatabase.memory();
   return [
@@ -87,7 +87,8 @@ List<Override> buildDownloadOverrides({
       _FakeDownloadNotificationService(),
     ),
     downloadDownloaderProvider.overrideWithValue(
-      downloader ?? ((uri) async => Uint8List.fromList([1, 2, 3, 4])),
+      downloader ??
+          ((uri, {onProgress}) async => Uint8List.fromList([1, 2, 3, 4])),
     ),
   ];
 }
@@ -847,7 +848,8 @@ void main() {
             ),
             // 下载执行器也抛错 → 队列任务 failed → 按钮回到可重试状态。
             ...buildDownloadOverrides(
-              downloader: (uri) async => throw Exception('Network timeout'),
+              downloader: (uri, {onProgress}) async =>
+                  throw Exception('Network timeout'),
             ),
           ],
           child: const CupertinoApp(

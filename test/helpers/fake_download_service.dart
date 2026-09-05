@@ -60,7 +60,7 @@ class FakeTurnNotificationService implements TurnNotificationService {
 List<Override> createDownloadTestOverrides({
   AppDatabase? db,
   Directory? tempDir,
-  Future<Uint8List> Function(Uri)? downloader,
+  DownloadBytesDownloader? downloader,
   TurnNotificationService? notificationService,
 }) {
   final database = db ?? AppDatabase.memory();
@@ -77,7 +77,8 @@ List<Override> createDownloadTestOverrides({
       notificationService ?? FakeTurnNotificationService(),
     ),
     downloadDownloaderProvider.overrideWithValue(
-      downloader ?? ((uri) async => Uint8List.fromList([1, 2, 3, 4])),
+      downloader ??
+          ((uri, {onProgress}) async => Uint8List.fromList([1, 2, 3, 4])),
     ),
   ];
 }

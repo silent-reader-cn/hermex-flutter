@@ -22,14 +22,14 @@ Future<bool?> showDownloadConfirmationDialog(
   final sizeText = expectedBytes != null && expectedBytes > 0
       ? formatDownloadByteSize(expectedBytes)
       : l10n.downloadUnknownSize;
-  final sessionText = (sourceDescription != null &&
-          sourceDescription.isNotEmpty)
+  final sessionText =
+      (sourceDescription != null && sourceDescription.isNotEmpty)
       ? sourceDescription
       : ((sessionId != null && sessionId.isNotEmpty)
-          ? (sessionId.length > 12
-              ? '${sessionId.substring(0, 12)}…'
-              : sessionId)
-          : null);
+            ? (sessionId.length > 12
+                  ? '${sessionId.substring(0, 12)}…'
+                  : sessionId)
+            : null);
 
   return showCupertinoDialog<bool>(
     context: context,

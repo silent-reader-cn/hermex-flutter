@@ -114,7 +114,7 @@ void main() {
   });
 
   ProviderContainer createContainer({
-    Future<Uint8List> Function(Uri)? customDownloader,
+    DownloadBytesDownloader? customDownloader,
     DownloadSaveService? customSaveService,
   }) {
     return ProviderContainer(
@@ -126,7 +126,7 @@ void main() {
         turnNotificationServiceProvider.overrideWithValue(notificationService),
         downloadDownloaderProvider.overrideWithValue(
           customDownloader ??
-              (url) async {
+              (url, {onProgress}) async {
                 final key = url.toString();
                 if (mockDownloadResponses.containsKey(key)) {
                   return mockDownloadResponses[key]!();
@@ -189,7 +189,8 @@ void main() {
 
     test('任务下载失败：更新 failed、填充 failureMessage、记录 error 日志', () async {
       final container = createContainer(
-        customDownloader: (url) async => throw Exception('网络连接超时 504'),
+        customDownloader: (url, {onProgress}) async =>
+            throw Exception('网络连接超时 504'),
       );
       addTearDown(container.dispose);
 
@@ -216,12 +217,72 @@ void main() {
       expect(persisted?.failureMessage, contains('网络连接超时 504'));
     });
 
+    test('#69 下载过程进度回传：onProgress 中途刷新 receivedBytes/expectedBytes', () async {
+      final progressEmitted = Completer<void>();
+      final releaseDownload = Completer<void>();
+
+      final container = createContainer(
+        customDownloader: (url, {onProgress}) async {
+          // 模拟 dio 分块回调：先报一半（total 已知），等测试读取中间态后放行。
+          onProgress?.call(500, 1000);
+          progressEmitted.complete();
+          await releaseDownload.future;
+          return Uint8List(1000);
+        },
+      );
+      addTearDown(container.dispose);
+
+      final controller = container.read(downloadControllerProvider.notifier);
+      final id = await controller.enqueue(
+        sourceUrl: 'https://example.com/progress.bin',
+        fileName: 'progress.bin',
+      );
+
+      await progressEmitted.future;
+      // 回调里 DateTime.now() 距 epoch 恒 >100ms → 首帧必刷。等一帧 state 更新。
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      var task = container.read(downloadControllerProvider).taskById(id);
+      expect(task, isNotNull);
+      expect(task!.status, DownloadStatus.downloading);
+      expect(task.receivedBytes, 500);
+      expect(task.expectedBytes, 1000);
+      expect(task.progress, closeTo(0.5, 0.01));
+
+      releaseDownload.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      task = container.read(downloadControllerProvider).taskById(id);
+      expect(task!.status, DownloadStatus.completed);
+    });
+
+    test('#69 total 未知(-1)时进度仍回传 receivedBytes', () async {
+      final container = createContainer(
+        customDownloader: (url, {onProgress}) async {
+          onProgress?.call(700, -1);
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          return Uint8List(700);
+        },
+      );
+      addTearDown(container.dispose);
+
+      final controller = container.read(downloadControllerProvider.notifier);
+      final id = await controller.enqueue(
+        sourceUrl: 'https://example.com/unknown_total.bin',
+        fileName: 'unknown_total.bin',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      final task = container.read(downloadControllerProvider).taskById(id);
+      // 首帧回调即刷 receivedBytes（timeHit）；完成后为 completed+700。
+      expect(task!.receivedBytes, 700);
+    });
+
     test('取消排队中任务：状态转为 cancelled 并跳过下载', () async {
       final downloadStarted = Completer<void>();
       final blockFirstDownload = Completer<void>();
 
       final container = createContainer(
-        customDownloader: (url) async {
+        customDownloader: (url, {onProgress}) async {
           if (url.toString().contains('first')) {
             downloadStarted.complete();
             await blockFirstDownload.future;
@@ -270,7 +331,7 @@ void main() {
       final finishDownload = Completer<void>();
 
       final container = createContainer(
-        customDownloader: (url) async {
+        customDownloader: (url, {onProgress}) async {
           downloadStarted.complete();
           await finishDownload.future;
           return Uint8List.fromList([1, 2, 3]);
@@ -310,7 +371,7 @@ void main() {
     test('重试失败/已取消任务：重新加入队列并成功完成', () async {
       var failOnce = true;
       final container = createContainer(
-        customDownloader: (url) async {
+        customDownloader: (url, {onProgress}) async {
           if (failOnce) {
             failOnce = false;
             throw Exception('第一次失败');
@@ -345,7 +406,7 @@ void main() {
     test('已完成任务去重：本地文件仍存在直接返回已存在任务 ID，不重复下载', () async {
       var downloadCalls = 0;
       final container = createContainer(
-        customDownloader: (url) async {
+        customDownloader: (url, {onProgress}) async {
           downloadCalls++;
           return Uint8List.fromList([1, 2, 3]);
         },
@@ -389,7 +450,7 @@ void main() {
       final blockDownload = Completer<void>();
       final downloadStarted = Completer<void>();
       final container = createContainer(
-        customDownloader: (url) async {
+        customDownloader: (url, {onProgress}) async {
           downloadStarted.complete();
           await blockDownload.future;
           return Uint8List(10);
@@ -447,7 +508,7 @@ void main() {
     test('内存字节模式：直接保存文件，不经过网络下载器，sourceType 为 bytes', () async {
       var networkCalled = false;
       final container = createContainer(
-        customDownloader: (url) async {
+        customDownloader: (url, {onProgress}) async {
           networkCalled = true;
           return Uint8List(0);
         },
@@ -488,7 +549,7 @@ void main() {
     test('Data URI 模式：解码 base64 直接落盘，sourceType 为 bytes 且不调下载器', () async {
       var networkCalled = false;
       final container = createContainer(
-        customDownloader: (url) async {
+        customDownloader: (url, {onProgress}) async {
           networkCalled = true;
           return Uint8List(0);
         },
