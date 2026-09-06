@@ -77,6 +77,6 @@
 - 位置：`lib/app/shell/sidebar_utility_toolbar.dart:67`（宽屏侧栏顶部入口 memory `CupertinoIcons.bookmark`）+ `lib/features/session_list/session_list_utility_rows.dart:112`（窄屏工具行同款，文档注释 :17 同步）
 - 复现：宽屏侧栏看「记忆」图标 = 聊天输入栏收藏提示词按钮（chat_input_bar.dart:704/1023 均为 bookmark）一模一样，认知混淆
 - 现状 vs 预期：现状 = 两个不相关功能共用同一图标；预期 = 记忆入口换语义专属图标
-- 修复：memory 图标 bookmark → `CupertinoIcons.archivebox`（记忆存档语义；候选框架实测存在 icons.dart:1666；全仓 grep 零占用；备选 `rosette` :7850 亦零占用，主人若不喜欢可一行换回）；窄屏工具行同步改保持两端一致（窄屏下拉菜单纯文字无图标不涉及）；tool_call_card 的 mem0_delete=bookmark（:587）与收藏提示词属正常语义不动
+- 修复：memory 图标 bookmark → `CupertinoIcons.book`（记忆库语义，icons.dart:123 框架实存；全仓 grep 零占用，与 bookmark 视觉差异明显；备选 `rosette` :7850 亦零占用，主人若不喜欢可一行换回）；窄屏工具行同步改保持两端一致（窄屏下拉菜单纯文字无图标不涉及）；tool_call_card 的 mem0_delete=bookmark（:587）与收藏提示词属正常语义不动
 - 验收：宽屏侧栏与窄屏工具行记忆图标不再是 bookmark；settings 可见性测试若断言图标需同步；金照若受影响 --update-goldens；真机目测两处入口新图标生效
 - 备注：2026-09-06 主人 OOB 追加；与 #71-#74 同批扇出
