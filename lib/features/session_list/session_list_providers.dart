@@ -11,8 +11,10 @@ import '../../core/api/api_exception.dart';
 import '../../core/api/custom_header.dart';
 import '../../core/cache/cache_providers.dart';
 import '../../core/connections/connection_providers.dart';
+import '../../core/connections/server_connection.dart';
 import '../../core/models/session.dart';
 import '../../core/models/workspace.dart';
+import '../desktop/desktop_lifecycle_observer.dart';
 import '../onboarding/onboarding_providers.dart';
 import '../settings/cron_visibility_settings.dart';
 
@@ -414,6 +416,9 @@ class SessionListController extends AsyncNotifier<SessionListState> {
   /// 用户是否已手动切换过 subagent 开关（防后台偏好加载覆盖即时操作）。
   bool _showSubagentCustomized = false;
 
+  /// 冷启动静默宽限是否已启动标记。
+  bool _hasStartedGrace = false;
+
   /// 本地记录的活跃流式会话映射（sessionId -> activeStreamId）。
   ///
   /// 用于本地乐观置位与跨全量刷新保持流式指示，流结束或后台纠偏后移除。
@@ -442,6 +447,14 @@ class SessionListController extends AsyncNotifier<SessionListState> {
   SessionListApi get _api =>
       ref.read(sessionListApiFactoryProvider)(ref.read(apiClientProvider));
 
+  /// 判断当前激活连接是否为内置 sidecar 连接。
+  bool _isBuiltinConnection() {
+    final active = ref.read(activeConnectionProvider);
+    return active != null &&
+        (active.kind == ConnectionKind.builtin ||
+            active.id == ServerConnection.builtinId);
+  }
+
   @override
   Future<SessionListState> build() async {
     // watch：切换服务器（apiClientProvider 重建）或工厂被替换时自动重载。
@@ -454,7 +467,7 @@ class SessionListController extends AsyncNotifier<SessionListState> {
       _focusDebounceTimer?.cancel();
       _focusDebounceTimer = null;
     });
-    final loaded = await _loadFirstPage(api);
+    final loaded = await _loadFirstPage(api, isColdStart: true);
     // 首屏状态就绪后再后台读取本地「显示 subagent 会话」偏好并回填
     // （不阻塞 build 完成；对齐 CronVisibilityController 的异步加载模式，
     // widget 测试无 prefs mock 时 SharedPreferences.getInstance() 会挂起，
@@ -547,6 +560,7 @@ class SessionListController extends AsyncNotifier<SessionListState> {
     SessionListApi api, {
     bool allowAutoReauth = true,
     bool showSubagent = false,
+    bool isColdStart = false,
   }) async {
     try {
       final response = await api.fetchSessions();
@@ -572,6 +586,7 @@ class SessionListController extends AsyncNotifier<SessionListState> {
           api,
           allowAutoReauth: false,
           showSubagent: showSubagent,
+          isColdStart: isColdStart,
         );
       }
       rethrow;
@@ -585,6 +600,29 @@ class SessionListController extends AsyncNotifier<SessionListState> {
         }
         if (cached.isNotEmpty) {
           final sessions = _overlayStreaming(cached);
+          // 内置连接在冷启动期间遇到可缓存网络错误 → 进入静默宽限，暂不弹模态 actionError
+          if (isColdStart && _isBuiltinConnection()) {
+            _hasStartedGrace = true;
+            String? healthUrl;
+            try {
+              final client = ref.read(apiClientProvider);
+              final rawUrl = client.baseUrl.endsWith('/')
+                  ? '${client.baseUrl}health'
+                  : '${client.baseUrl}/health';
+              healthUrl = rawUrl.replaceAll('://0.0.0.0', '://127.0.0.1');
+            } catch (_) {}
+            ref
+                .read(coldStartGraceControllerProvider.notifier)
+                .startGrace(
+                  pendingActionError: '离线缓存：当前显示最近缓存的会话',
+                  healthUrl: healthUrl,
+                );
+            return SessionListState(
+              sessions: sessions,
+              visibleCount: min(pageSize, sessions.length),
+              showSubagent: showSubagent,
+            );
+          }
           return SessionListState(
             sessions: sessions,
             visibleCount: min(pageSize, sessions.length),
@@ -626,6 +664,10 @@ class SessionListController extends AsyncNotifier<SessionListState> {
   Future<void> refresh() async {
     if (_refreshInFlight) return;
     _refreshInFlight = true;
+    if (_hasStartedGrace) {
+      _hasStartedGrace = false;
+      ref.read(coldStartGraceControllerProvider.notifier).cancelGrace();
+    }
     final previous = state.valueOrNull;
     final hadData = previous != null;
     if (hadData) {
@@ -643,6 +685,7 @@ class SessionListController extends AsyncNotifier<SessionListState> {
       final result = await _loadFirstPage(
         api,
         showSubagent: previous?.showSubagent ?? false,
+        isColdStart: false,
       );
       // 离线缓存兜底返回的也算作“失败但有缓存”（actionError 以 离线缓存 开头），需走失败分支
       final isCachedFallback =
@@ -748,6 +791,22 @@ class SessionListController extends AsyncNotifier<SessionListState> {
     final current = state.valueOrNull;
     if (current == null || current.actionError == null) return;
     state = AsyncData(current.copyWith(actionError: () => null));
+  }
+
+  /// 冷启动静默宽限超时或失败：补落暂存的 actionError（若当前尚未产生错误）。
+  void applyGraceTimeout(String message) {
+    _hasStartedGrace = false;
+    if (!state.hasValue) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (current.actionError == null) {
+      state = AsyncData(
+        current.copyWith(
+          actionError: () => message,
+          consecutiveFailures: current.consecutiveFailures + 1,
+        ),
+      );
+    }
   }
 
   /// 切换筛选模式；来源/项目筛选为本地过滤（无需新请求），
@@ -1523,4 +1582,3 @@ List<WorkspaceRoot> rankWorkspaces({
 
   return ranked.take(maxItems).toList();
 }
-

@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../app/router.dart';
+import '../../core/install/webui_bootstrap.dart';
 import '../chat/chat_providers.dart';
 import '../session_list/session_list_providers.dart';
 import '../webui_sidecar/webui_sidecar_providers.dart';
@@ -253,33 +254,249 @@ class _DesktopLifecycleObserverState
     });
 
     // 监听 Sidecar 配置变更（捕获异步首值跳变 false->true 及设置页开关联动）
-    ref.listen<SidecarConfig>(
-      webuiSidecarConfigProvider,
-      (previous, next) {
-        if (!isDesktop) return;
-        final currentStatus = ref.read(webuiSidecarControllerProvider).status;
-        if (previous?.enabled != true &&
-            next.enabled &&
-            currentStatus != SidecarStatus.running &&
-            currentStatus != SidecarStatus.starting) {
-          unawaited(ref.read(webuiSidecarControllerProvider.notifier).start());
-        }
-        if (previous?.enabled != next.enabled ||
-            previous?.host != next.host ||
-            previous?.port != next.port) {
-          ref.read(trayManagerServiceProvider).scheduleThrottledUpdateContextMenu();
-        }
-      },
-    );
+    ref.listen<SidecarConfig>(webuiSidecarConfigProvider, (previous, next) {
+      if (!isDesktop) return;
+      final currentStatus = ref.read(webuiSidecarControllerProvider).status;
+      if (previous?.enabled != true &&
+          next.enabled &&
+          currentStatus != SidecarStatus.running &&
+          currentStatus != SidecarStatus.starting) {
+        unawaited(ref.read(webuiSidecarControllerProvider.notifier).start());
+      }
+      if (previous?.enabled != next.enabled ||
+          previous?.host != next.host ||
+          previous?.port != next.port) {
+        ref
+            .read(trayManagerServiceProvider)
+            .scheduleThrottledUpdateContextMenu();
+      }
+    });
 
     // 监听 Sidecar 运行状态变更（状态机转换触发托盘菜单刷新，带 500ms 节流）
     ref.listen<SidecarState>(webuiSidecarControllerProvider, (previous, next) {
       if (!isDesktop) return;
       if (previous?.status != next.status) {
-        ref.read(trayManagerServiceProvider).scheduleThrottledUpdateContextMenu();
+        ref
+            .read(trayManagerServiceProvider)
+            .scheduleThrottledUpdateContextMenu();
       }
     });
 
     return widget.child;
+  }
+}
+
+/// 冷启动静默宽限阶段。
+enum ColdStartGracePhase {
+  /// 闲置 / 未进入宽限
+  idle,
+
+  /// 宽限中（内置连接冷启动遇到可缓存网络错误）
+  active,
+
+  /// 就绪恢复：Sidecar 或健康检查就绪并已触发自动刷新
+  resolved,
+
+  /// 宽限超时或启动失败，已回落真实错误
+  expired,
+}
+
+/// 冷启动静默宽限状态。
+class ColdStartGraceState {
+  const ColdStartGraceState({
+    this.phase = ColdStartGracePhase.idle,
+    this.pendingActionError,
+  });
+
+  /// 当前阶段。
+  final ColdStartGracePhase phase;
+
+  /// 宽限期间暂存的错误信息（超时或失败时落盘到 [SessionListState.actionError]）。
+  final String? pendingActionError;
+
+  /// 是否处于宽限活跃中。
+  bool get isActive => phase == ColdStartGracePhase.active;
+
+  ColdStartGraceState copyWith({
+    ColdStartGracePhase? phase,
+    String? Function()? pendingActionError,
+  }) {
+    return ColdStartGraceState(
+      phase: phase ?? this.phase,
+      pendingActionError: pendingActionError != null
+          ? pendingActionError()
+          : this.pendingActionError,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ColdStartGraceState &&
+          other.phase == phase &&
+          other.pendingActionError == pendingActionError;
+
+  @override
+  int get hashCode => Object.hash(phase, pendingActionError);
+}
+
+/// 探测内置 sidecar 健康检查器 Provider（测试可覆盖）。
+final sidecarHealthCheckerProvider = Provider<HealthChecker>((ref) {
+  return const SystemHealthChecker();
+});
+
+/// 冷启动宽限超时时长（默认 4 秒，对齐 3~5s 规格；测试可覆盖）。
+final coldStartGraceTimeoutProvider = Provider<Duration>((ref) {
+  return const Duration(seconds: 4);
+});
+
+/// 冷启动宽限健康探测轮询间隔（默认 500ms；测试可覆盖）。
+final coldStartGraceIntervalProvider = Provider<Duration>((ref) {
+  return const Duration(milliseconds: 500);
+});
+
+/// 内置 sidecar 健康探测 URL（默认 http://127.0.0.1:8787/health；测试可覆盖）。
+final sidecarHealthUrlProvider = Provider<String>((ref) {
+  return 'http://127.0.0.1:8787/health';
+});
+
+/// 冷启动宽限控制器 Provider。
+final coldStartGraceControllerProvider =
+    NotifierProvider<ColdStartGraceController, ColdStartGraceState>(
+      ColdStartGraceController.new,
+    );
+
+/// 冷启动静默宽限控制器。
+///
+/// 职责：
+/// 1. 当内置连接在冷启动期间遇到可缓存网络错误时，开启 3~5s 的静默宽限期；
+/// 2. 宽限期内轮询 /health 或监听 SidecarState，成功就绪时自动触发 SessionListController 刷新；
+/// 3. 若宽限期超时或 Sidecar 启动失败，则补落暂存的 actionError（不吞真错误）；
+/// 4. 手动刷新、非内置连接、非网络类错误均不享受宽限。
+class ColdStartGraceController extends Notifier<ColdStartGraceState> {
+  Timer? _timeoutTimer;
+  Timer? _pollTimer;
+
+  @override
+  ColdStartGraceState build() {
+    ref.onDispose(_cancelTimers);
+
+    // 监听 Sidecar 状态机变迁：如果 Sidecar 提前 running 或 failed，联动宽限状态
+    ref.listen<SidecarState>(webuiSidecarControllerProvider, (previous, next) {
+      if (state.phase != ColdStartGracePhase.active) return;
+      if (next.status == SidecarStatus.running) {
+        _resolveGrace();
+      } else if (next.status == SidecarStatus.failed) {
+        _expireGrace();
+      }
+    });
+
+    return const ColdStartGraceState();
+  }
+
+  void _cancelTimers() {
+    _timeoutTimer?.cancel();
+    _timeoutTimer = null;
+    _pollTimer?.cancel();
+    _pollTimer = null;
+  }
+
+  String? _healthUrl;
+
+  /// 开启冷启动静默宽限。
+  void startGrace({
+    required String pendingActionError,
+    Duration? timeout,
+    Duration? interval,
+    String? healthUrl,
+  }) {
+    if (state.phase == ColdStartGracePhase.active) return;
+
+    _cancelTimers();
+    _healthUrl = healthUrl;
+
+    state = ColdStartGraceState(
+      phase: ColdStartGracePhase.active,
+      pendingActionError: pendingActionError,
+    );
+
+    final Duration effectiveTimeout =
+        timeout ?? ref.read<Duration>(coldStartGraceTimeoutProvider);
+    final Duration effectiveInterval =
+        interval ?? ref.read<Duration>(coldStartGraceIntervalProvider);
+
+    _timeoutTimer = Timer(effectiveTimeout, () {
+      _expireGrace();
+    });
+
+    _pollTimer = Timer.periodic(effectiveInterval, (_) {
+      unawaited(_pollHealth());
+    });
+
+    // 立即发起一次健康探测
+    unawaited(_pollHealth());
+  }
+
+  /// 取消当前宽限（如用户手动刷新或切换连接）。
+  void cancelGrace() {
+    _cancelTimers();
+    if (state.phase == ColdStartGracePhase.active) {
+      state = const ColdStartGraceState(
+        phase: ColdStartGracePhase.idle,
+        pendingActionError: null,
+      );
+    }
+  }
+
+  /// 轮询内置连接健康接口。
+  Future<void> _pollHealth() async {
+    if (state.phase != ColdStartGracePhase.active) {
+      _pollTimer?.cancel();
+      _pollTimer = null;
+      return;
+    }
+
+    final String targetUrl =
+        _healthUrl ?? ref.read<String>(sidecarHealthUrlProvider);
+
+    try {
+      final HealthChecker checker = ref.read<HealthChecker>(
+        sidecarHealthCheckerProvider,
+      );
+      final isHealthy = await checker.checkHealth(targetUrl);
+      if (state.phase != ColdStartGracePhase.active) return;
+      if (isHealthy) {
+        _resolveGrace();
+      }
+    } catch (_) {
+      // 失败属于正常未就绪态，继续等待下一次轮询或超时
+    }
+  }
+
+  /// 宽限就绪恢复：取消定时器，更新状态为 resolved，并触发会话列表刷新。
+  void _resolveGrace() {
+    if (state.phase != ColdStartGracePhase.active) return;
+    _cancelTimers();
+    state = const ColdStartGraceState(
+      phase: ColdStartGracePhase.resolved,
+      pendingActionError: null,
+    );
+    unawaited(ref.read(sessionListControllerProvider.notifier).refresh());
+  }
+
+  /// 宽限超时或失败：取消定时器，更新状态为 expired，补落 pendingActionError。
+  void _expireGrace() {
+    if (state.phase != ColdStartGracePhase.active) return;
+    _cancelTimers();
+    final pending = state.pendingActionError;
+    state = const ColdStartGraceState(
+      phase: ColdStartGracePhase.expired,
+      pendingActionError: null,
+    );
+    if (pending != null) {
+      ref
+          .read(sessionListControllerProvider.notifier)
+          .applyGraceTimeout(pending);
+    }
   }
 }
