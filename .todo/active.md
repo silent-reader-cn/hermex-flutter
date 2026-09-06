@@ -15,6 +15,8 @@
 
 ---
 
+---
+
 ### #72 [P2 未修复] App 冷启动 sidecar 未就绪窗口期弹模态「操作失败·离线缓存」
 - 位置：启动链 sidecar 拉起（`webui_sidecar_service` start 异步）与会话列表首刷（`desktop_lifecycle_observer` / connections 激活）时序竞争
 - 复现（E2E 实证）：已配置内置连接后重启 hermes_ui.exe → 首帧会话列表请求打到尚未 LISTENING 的 :8787 → 中央模态「操作失败 离线缓存：当前显示最近缓存的会话」需手点「好」；数秒后 sidecar 就绪列表自动恢复（截图 20/24）
@@ -24,22 +26,6 @@
 ---
 
 ---
-
----
-
----
-
-### #73 [P0 未修复·未开工] live 文本反复重复：SSE 订阅连接泄漏叠加（N 条连接各送一份事件流）
-- 位置：`lib/features/chat/chat_controller.dart` `_connectStream`（:1221-1274）与 `_loadMessagesAndResume`（:3042-3069）；`lib/core/api/sse_client.dart` `SseClient.start`（:762-802 `_cancelToken = CancelToken()` 直接覆盖）；`lib/features/chat/chat_providers.dart` 看门狗阈值（:75-81）
-- 复现（2026-09-06 主人日志实证，v0.1.24 真机）：live 生成中出现整段/逐词重复文本（「本喵喵」式）；诊断日志同一 token/reasoning/tool 事件成倍出现（9a8c 会话 ×6-7 份、c661f6 会话 ×2 份），heartbeat 每 ~5s 成串 6-8 条同刻到达；`/api/system/health` 的 `streams.subscribers` 12s 内 8→9→10 单调上涨
-- 根因（源码行号实证）：恢复路径从不关旧 SSE 连接——①`_checkStatusAndReconnect` → status active → `_loadMessagesAndResume` → `_connectStream` → `api.startStream` 全链无 stopStream()（全项目仅 `_forceReconnect` :3135 先 stopStream）；②`SseClient.start` 覆盖 `_cancelToken` 不 cancel 旧请求 → 旧连接永久存活继续吐事件；③触发源 = 工具执行期 `isToolProgressStale`（:3190-3193，progress>18s 无视传输健康）与 resume 主动探针（:1511-1525，gap≥2s）——heartbeat 每 5s 准时到达（传输活着）照样触发 status 轮询 → active → 再叠一条；长工具回合每轮 +1 累积到 6-7 条；④live token 去重只覆盖 replay 窗口（`deduplicatedReplayToken` :1364-1378，游标追平 stillReplay=false 后裸追加）→ N 条连接同一 token 各 append 一次 = 文本重复 N 倍
-- 与既有修复的边界：G（interim 快照 #60）/D（replay 重放 #42/e57ce9b）/I（隐形 text 断点 #62）均不覆盖本形态——这是「多连接并发灌入」新类别，非重放去重问题
-- 修复方案（2026-09-06 分析定稿，待主人拍板后开工）：
-  - A 根治：`_connectStream` 入口先 `stopStream()` 再建新连接；更稳 = `SseClient.start()` 内部先 cancel 旧 token（防御所有调用方；clarify 流已是此写法 chat_server_api.dart:361）
-  - B 消触发源：`isToolProgressStale`/`isToolProgressForce` 加 transport-fresh 门控——heartbeat 持续到达（`_lastTransportActivity` 距今 < 心跳间隔×2）则不触发 status 轮询/强重连（工具跑得慢 ≠ 连接死了）
-  - 可选 C 兜底：live token 追加前按「整段包含+尾首重叠」二次去重（同 #60 手法），防其他路径再灌重复
-- 验收：①修复后 live 长工具回合（如 6 分钟后台命令）期间 `/api/system/health` 的 `subscribers` 稳定 = 活跃会话数、不单调上涨；②诊断日志 heartbeat 单条 ~5s 间隔不再成串；③live 正文无重复追加；④回归测试：SseClient.start 覆盖前 cancel 旧 token + watchdog transport-fresh 门控两案
-- 备注：主人指示先落盘不修复，待拍板开工
 
 ---
 
