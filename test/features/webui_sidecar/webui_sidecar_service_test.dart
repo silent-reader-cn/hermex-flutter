@@ -56,7 +56,7 @@ class _FakeProcess implements Process {
 
 class _FakeProcessExecutor implements ProcessExecutor {
   _FakeProcessExecutor({_FakeProcess? defaultProcess})
-      : processToReturn = defaultProcess ?? _FakeProcess();
+    : processToReturn = defaultProcess ?? _FakeProcess();
 
   _FakeProcess processToReturn;
   final List<List<String>> runCalls = [];
@@ -133,9 +133,12 @@ class _FakeSidecarFileSystem implements SidecarFileSystem {
 
   bool bundleAvailable = true;
   String root = r'C:\app\webui';
+  String agentDir = r'C:\Users\Admin\AppData\Local\hermes\hermes-agent';
 
   final List<String> logLines = [];
   int rotateCalls = 0;
+
+  bool Function(String path)? fileExistsOverride;
 
   @override
   String? get envSidecarRoot => null;
@@ -143,17 +146,26 @@ class _FakeSidecarFileSystem implements SidecarFileSystem {
   @override
   String get defaultSidecarDir => root;
 
-  @override
-  String get logDirectoryPath => r'C:\Users\Admin\AppData\Local\hermes\webui-bundled\logs';
+  String get hermesAgentDir => agentDir;
 
   @override
-  String get logFilePath => r'C:\Users\Admin\AppData\Local\hermes\webui-bundled\logs\webui.log';
+  String get logDirectoryPath =>
+      r'C:\Users\Admin\AppData\Local\hermes\webui-bundled\logs';
+
+  @override
+  String get logFilePath =>
+      r'C:\Users\Admin\AppData\Local\hermes\webui-bundled\logs\webui.log';
 
   @override
   bool directoryExists(String path) => true;
 
   @override
-  bool fileExists(String path) => true;
+  bool fileExists(String path) {
+    if (fileExistsOverride != null) {
+      return fileExistsOverride!(path);
+    }
+    return true;
+  }
 
   @override
   Future<void> createDirectory(String path, {bool recursive = true}) async {}
@@ -207,6 +219,7 @@ void main() {
       Duration takeoverInterval = const Duration(milliseconds: 20),
       Duration stopGracePeriod = const Duration(milliseconds: 50),
       BackoffCalculator? backoffCalculator,
+      String? customAgentDir,
     }) {
       return DefaultWebuiSidecarService(
         getConfig: () => currentConfig,
@@ -219,6 +232,7 @@ void main() {
         takeoverInterval: takeoverInterval,
         stopGracePeriod: stopGracePeriod,
         backoffCalculator: backoffCalculator ?? (_) => Duration.zero,
+        customAgentDir: customAgentDir,
       );
     }
 
@@ -244,6 +258,7 @@ void main() {
       expect(env['HERMES_WEBUI_PORT'], '8787');
       expect(env['HERMES_WEBUI_PASSWORD'], 'my_secret_token_xyz');
       expect(env['PYTHONDONTWRITEBYTECODE'], '1');
+      expect(env['HERMES_WEBUI_AGENT_DIR'], fakeFs.agentDir);
       expect(env.containsKey('HERMES_HOME'), isFalse);
 
       expect(fakeHealth.checkCalls, greaterThanOrEqualTo(1));
@@ -291,21 +306,24 @@ void main() {
       expect(fakeExecutor.startCalls, isEmpty);
     });
 
-    test('接管模式：端口能通且 /health 为 ok -> running、无 PID、接管 watchdog 仅轮 health', () async {
-      fakeProber.isOpen = true;
-      fakeHealth.alwaysReturn = true;
-      final service = createService();
+    test(
+      '接管模式：端口能通且 /health 为 ok -> running、无 PID、接管 watchdog 仅轮 health',
+      () async {
+        fakeProber.isOpen = true;
+        fakeHealth.alwaysReturn = true;
+        final service = createService();
 
-      await service.start();
+        await service.start();
 
-      expect(service.currentState.status, SidecarStatus.running);
-      expect(service.currentState.pid, isNull);
-      expect(service.currentState.detail, contains('Takeover'));
-      expect(fakeExecutor.startCalls, isEmpty);
+        expect(service.currentState.status, SidecarStatus.running);
+        expect(service.currentState.pid, isNull);
+        expect(service.currentState.detail, contains('Takeover'));
+        expect(fakeExecutor.startCalls, isEmpty);
 
-      await service.stop();
-      expect(service.currentState.status, SidecarStatus.stopped);
-    });
+        await service.stop();
+        expect(service.currentState.status, SidecarStatus.stopped);
+      },
+    );
 
     test('host 为 0.0.0.0 时健康检查与 socket 探测使用 127.0.0.1', () async {
       currentConfig = const SidecarConfig(
@@ -348,10 +366,15 @@ void main() {
       await service.stop();
 
       expect(fakeProcess.killed, isTrue);
-      expect(fakeExecutor.runCalls.any((call) =>
-          call[0] == 'taskkill' &&
-          call.contains('/PID') &&
-          call.contains('7788')), isTrue);
+      expect(
+        fakeExecutor.runCalls.any(
+          (call) =>
+              call[0] == 'taskkill' &&
+              call.contains('/PID') &&
+              call.contains('7788'),
+        ),
+        isTrue,
+      );
       expect(service.currentState.status, SidecarStatus.stopped);
     });
 
@@ -365,7 +388,10 @@ void main() {
 
       await service.stop();
 
-      expect(fakeExecutor.runCalls.any((call) => call[0] == 'taskkill'), isFalse);
+      expect(
+        fakeExecutor.runCalls.any((call) => call[0] == 'taskkill'),
+        isFalse,
+      );
       expect(service.currentState.status, SidecarStatus.stopped);
     });
 
@@ -401,8 +427,12 @@ void main() {
       final service = createService();
       await service.start();
 
-      fakeProcess.emitStdout('Server starting with password: my_secret_token_xyz\n');
-      fakeProcess.emitStderr('Failed auth for password my_secret_token_xyz from 1.2.3.4\n');
+      fakeProcess.emitStdout(
+        'Server starting with password: my_secret_token_xyz\n',
+      );
+      fakeProcess.emitStderr(
+        'Failed auth for password my_secret_token_xyz from 1.2.3.4\n',
+      );
 
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
@@ -423,8 +453,215 @@ void main() {
 
       expect(service.currentState.status, SidecarStatus.failed);
       expect(service.currentState.reason, SidecarFailureReason.startFailed);
-      expect(service.currentState.detail, contains('only supported on Windows'));
+      expect(
+        service.currentState.detail,
+        contains('only supported on Windows'),
+      );
       expect(fakeExecutor.startCalls, isEmpty);
+    });
+  });
+
+  group('WebUI Sidecar Python 解释器选择与 Agent 环境变量注入 (TASK #71 方案 B′)', () {
+    late _FakeProcess fakeProcess;
+    late _FakeProcessExecutor fakeExecutor;
+    late _FakePortProber fakeProber;
+    late _FakeHealthChecker fakeHealth;
+    late _FakeSidecarFileSystem fakeFs;
+    late SidecarConfig currentConfig;
+
+    setUp(() {
+      fakeProcess = _FakeProcess(pid: 7788);
+      fakeExecutor = _FakeProcessExecutor(defaultProcess: fakeProcess);
+      fakeProber = _FakePortProber();
+      fakeHealth = _FakeHealthChecker(alwaysReturn: true);
+      fakeFs = _FakeSidecarFileSystem();
+      currentConfig = const SidecarConfig(
+        enabled: true,
+        host: '127.0.0.1',
+        port: 8787,
+        password: 'my_secret_token_xyz',
+      );
+    });
+
+    DefaultWebuiSidecarService createService({
+      Duration healthTimeout = const Duration(seconds: 30),
+      Duration healthInterval = const Duration(milliseconds: 10),
+      Duration takeoverInterval = const Duration(milliseconds: 20),
+      Duration stopGracePeriod = const Duration(milliseconds: 50),
+      BackoffCalculator? backoffCalculator,
+      String? customAgentDir,
+    }) {
+      return DefaultWebuiSidecarService(
+        getConfig: () => currentConfig,
+        processExecutor: fakeExecutor,
+        fileSystem: fakeFs,
+        healthChecker: fakeHealth,
+        portProber: fakeProber,
+        healthTimeout: healthTimeout,
+        healthInterval: healthInterval,
+        takeoverInterval: takeoverInterval,
+        stopGracePeriod: stopGracePeriod,
+        backoffCalculator: backoffCalculator ?? (_) => Duration.zero,
+        customAgentDir: customAgentDir,
+      );
+    }
+
+    test(
+      '解释器探测分支 1：agent venv 命中 -> 优先使用 venv 解释器并注入 HERMES_WEBUI_AGENT_DIR',
+      () async {
+        final expectedVenvPy = '${fakeFs.agentDir}\\venv\\Scripts\\python.exe';
+        fakeFs.fileExistsOverride = (path) => path == expectedVenvPy;
+
+        final service = createService();
+        await service.start();
+
+        expect(service.currentState.status, SidecarStatus.running);
+        expect(fakeExecutor.startCalls.length, 1);
+        final call = fakeExecutor.startCalls.first;
+        expect(call['executable'], expectedVenvPy);
+
+        final env = call['environment'] as Map<String, String>;
+        expect(env['HERMES_WEBUI_AGENT_DIR'], fakeFs.agentDir);
+        expect(env['HERMES_WEBUI_HOST'], '127.0.0.1');
+        expect(env['HERMES_WEBUI_PORT'], '8787');
+        expect(env['HERMES_WEBUI_PASSWORD'], 'my_secret_token_xyz');
+        expect(env['PYTHONDONTWRITEBYTECODE'], '1');
+
+        await service.stop();
+      },
+    );
+
+    test(
+      '解释器探测分支 2：venv 缺失但 .venv 命中 -> 使用 .venv 解释器并注入 HERMES_WEBUI_AGENT_DIR',
+      () async {
+        final expectedDotVenvPy =
+            '${fakeFs.agentDir}\\.venv\\Scripts\\python.exe';
+        fakeFs.fileExistsOverride = (path) => path == expectedDotVenvPy;
+
+        final service = createService();
+        await service.start();
+
+        expect(service.currentState.status, SidecarStatus.running);
+        expect(fakeExecutor.startCalls.length, 1);
+        final call = fakeExecutor.startCalls.first;
+        expect(call['executable'], expectedDotVenvPy);
+
+        final env = call['environment'] as Map<String, String>;
+        expect(env['HERMES_WEBUI_AGENT_DIR'], fakeFs.agentDir);
+        expect(env['HERMES_WEBUI_HOST'], '127.0.0.1');
+        expect(env['HERMES_WEBUI_PORT'], '8787');
+        expect(env['HERMES_WEBUI_PASSWORD'], 'my_secret_token_xyz');
+        expect(env['PYTHONDONTWRITEBYTECODE'], '1');
+
+        await service.stop();
+      },
+    );
+
+    test('解释器探测分支 3：venv 与 .venv 均缺失 -> 兜底使用 embedded python 并注入 HERMES_WEBUI_AGENT_DIR', () async {
+      final expectedEmbeddedPy = '${fakeFs.root}\\python\\python.exe';
+      fakeFs.fileExistsOverride = (path) {
+        if (path.contains('hermes-agent')) return false;
+        return true;
+      };
+
+      final service = createService();
+      await service.start();
+
+      expect(service.currentState.status, SidecarStatus.running);
+      expect(fakeExecutor.startCalls.length, 1);
+      final call = fakeExecutor.startCalls.first;
+      expect(call['executable'], expectedEmbeddedPy);
+
+      final env = call['environment'] as Map<String, String>;
+      expect(env['HERMES_WEBUI_AGENT_DIR'], fakeFs.agentDir);
+      expect(env['HERMES_WEBUI_HOST'], '127.0.0.1');
+      expect(env['HERMES_WEBUI_PORT'], '8787');
+      expect(env['HERMES_WEBUI_PASSWORD'], 'my_secret_token_xyz');
+      expect(env['PYTHONDONTWRITEBYTECODE'], '1');
+
+      await service.stop();
+    });
+
+    test('resolvePythonPath 探测优先级：venv > .venv > embedded python 兜底', () {
+      final service = createService();
+      final venvPy = '${fakeFs.agentDir}\\venv\\Scripts\\python.exe';
+      final dotVenvPy = '${fakeFs.agentDir}\\.venv\\Scripts\\python.exe';
+      final embeddedPy = '${fakeFs.root}\\python\\python.exe';
+
+      // 1. 两者皆有时优先 venv
+      fakeFs.fileExistsOverride = (path) => path == venvPy || path == dotVenvPy;
+      expect(service.resolvePythonPath(), venvPy);
+
+      // 2. venv 不在，.venv 在
+      fakeFs.fileExistsOverride = (path) => path == dotVenvPy;
+      expect(service.resolvePythonPath(), dotVenvPy);
+
+      // 3. 都不在，兜底 embedded
+      fakeFs.fileExistsOverride = (path) => false;
+      expect(service.resolvePythonPath(), embeddedPy);
+    });
+
+    test('watchdog 进程崩溃重启自愈保持相同解释器与 HERMES_WEBUI_AGENT_DIR', () async {
+      final expectedVenvPy = '${fakeFs.agentDir}\\venv\\Scripts\\python.exe';
+      fakeFs.fileExistsOverride = (path) => path == expectedVenvPy;
+
+      final service = createService();
+      await service.start();
+
+      expect(fakeExecutor.startCalls.length, 1);
+      expect(fakeExecutor.startCalls.first['executable'], expectedVenvPy);
+
+      // 模拟进程异常退出，触发 watchdog 自愈重拉
+      final restartProcess = _FakeProcess(pid: 8899);
+      fakeExecutor.processToReturn = restartProcess;
+      fakeProcess.completeExit(1);
+
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(fakeExecutor.startCalls.length, 2);
+      final restartedCall = fakeExecutor.startCalls[1];
+      expect(restartedCall['executable'], expectedVenvPy);
+      final restartedEnv = restartedCall['environment'] as Map<String, String>;
+      expect(restartedEnv['HERMES_WEBUI_AGENT_DIR'], fakeFs.agentDir);
+      expect(restartedEnv['HERMES_WEBUI_HOST'], '127.0.0.1');
+
+      await service.stop();
+    });
+
+    test(
+      'DefaultSidecarFileSystem 默认 hermesAgentDir 与 customAgentDir 构造断言',
+      () {
+        const fsDefault = DefaultSidecarFileSystem(
+          customLocalAppData: r'D:\CustomAppData',
+        );
+        expect(
+          fsDefault.hermesAgentDir,
+          r'D:\CustomAppData\hermes\hermes-agent',
+        );
+
+        const fsCustom = DefaultSidecarFileSystem(
+          customAgentDir: r'E:\DedicatedAgent',
+        );
+        expect(fsCustom.hermesAgentDir, r'E:\DedicatedAgent');
+      },
+    );
+
+    test('customAgentDir 可被 DefaultWebuiSidecarService 注入覆盖', () async {
+      const customAgentPath = r'Z:\SpecialAgent';
+      final expectedCustomVenvPy =
+          '$customAgentPath\\venv\\Scripts\\python.exe';
+      fakeFs.fileExistsOverride = (path) => path == expectedCustomVenvPy;
+
+      final service = createService(customAgentDir: customAgentPath);
+      await service.start();
+
+      expect(fakeExecutor.startCalls.length, 1);
+      final call = fakeExecutor.startCalls.first;
+      expect(call['executable'], expectedCustomVenvPy);
+      final env = call['environment'] as Map<String, String>;
+      expect(env['HERMES_WEBUI_AGENT_DIR'], customAgentPath);
+
+      await service.stop();
     });
   });
 }

@@ -79,6 +79,22 @@
    - 运行日志：`%LOCALAPPDATA%\hermes\webui-bundled\logs\`（由 App 负责从 stdout/stderr tee 写入，不落安装目录）
    - 业务状态/配置：`%LOCALAPPDATA%\hermes\`（`HERMES_HOME` 默认路径），与独立 agent / webui 实例共用数据目录
 
+### 2.1 Python 解释器选择与 Agent 依赖对齐（方案 B′，TASK #71）
+
+在 2026-09-06 安装包首测实证中定位：WebUI 服务端在聊天回合时于**进程内**直接 import Agent 核心（`api/streaming.py` 中的 `from run_agent import AIAgent`），而 Agent 需 `dotenv` 等全套第三方依赖（venv site-packages 实测 ~1.75GB）。内置 embedded Python 按 S4 零 pip 规格只预装了 WebUI 自身的两个轻依赖（`pyyaml` 与 `cryptography`），`server.py` 的 `auto_install_agent_deps()` 兜底在零 pip 环境注定失败，导致全新安装用户首发消息报错 `AIAgent not available`。
+
+为兼顾安装包小巧（~50MB）与全新安装开箱即可发收消息，采纳 **方案 B′（解释器优先复用 Agent venv，Embedded 兜底；否决方案 A 构建期全量预装 1.75GB 依赖）**：
+1. **解释器探测优先级**（纯 IO 探测，`webui_sidecar_service.dart`）：
+   - **首选 Agent 默认 venv**：`%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\python.exe` 存在 → 选用之（与 Gateway 共享成熟环境，天然具备 `dotenv` 等全套依赖且版本对齐）；
+   - **次选 Agent .venv**：`%LOCALAPPDATA%\hermes\hermes-agent\.venv\Scripts\python.exe` 存在 → 选用之；
+   - **兜底 Embedded Python**：若本机未安装 Agent 或 venv 目录不存在，兜底使用随包分发的 `<安装目录>\webui\python\python.exe`（此时 WebUI 历史/会话只读可用，聊天提示 AIAgent not available 属预期）。
+2. **显式注入环境变量**：
+   - 启动 Sidecar 进程时追加 `HERMES_WEBUI_AGENT_DIR=%LOCALAPPDATA%\hermes\hermes-agent`，显式指定 Agent 源码根目录，消除 WebUI 上游多策略猜测带来的漂移风险；
+   - 现有 4 个环境变量（`HERMES_WEBUI_HOST`、`HERMES_WEBUI_PORT`、`HERMES_WEBUI_PASSWORD`、`PYTHONDONTWRITEBYTECODE=1`）严格保持不变。
+3. **分发包产物与脚本零改动**：
+   - 打包脚本（`build_webui_bundle.ps1`）与 Inno Setup 脚本（`installer/hermes-ui.iss`）零改动；
+   - 内置 embedded Python 仍随包分发作为坚实离线兜底，安装包体积（~50MB）与零 pip 断言不受影响。
+
 ---
 
 ## 3. Embedded Python 环境构建标准

@@ -92,6 +92,7 @@ class DefaultSidecarFileSystem implements SidecarFileSystem {
     this.customExePath,
     this.customEnvRoot,
     this.customLocalAppData,
+    this.customAgentDir,
   });
 
   /// 自定义 exe 路径（测试注入用）。
@@ -102,6 +103,9 @@ class DefaultSidecarFileSystem implements SidecarFileSystem {
 
   /// 自定义 LOCALAPPDATA（测试注入用）。
   final String? customLocalAppData;
+
+  /// 自定义 Hermes Agent 根目录（测试注入用）。
+  final String? customAgentDir;
 
   @override
   bool get isWindows => Platform.isWindows;
@@ -116,15 +120,21 @@ class DefaultSidecarFileSystem implements SidecarFileSystem {
     return '${File(exe).parent.path}${Platform.pathSeparator}webui';
   }
 
+  String get _localAppData =>
+      customLocalAppData ??
+      Platform.environment['LOCALAPPDATA'] ??
+      (Platform.isWindows
+          ? 'C:\\Users\\${Platform.environment['USERNAME'] ?? 'User'}\\AppData\\Local'
+          : '');
+
+  /// Hermes Agent 安装根目录（`%LOCALAPPDATA%\hermes\hermes-agent`）。
+  String get hermesAgentDir =>
+      customAgentDir ??
+      '$_localAppData${Platform.pathSeparator}hermes${Platform.pathSeparator}hermes-agent';
+
   @override
-  String get logDirectoryPath {
-    final base = customLocalAppData ??
-        Platform.environment['LOCALAPPDATA'] ??
-        (Platform.isWindows
-            ? 'C:\\Users\\${Platform.environment['USERNAME'] ?? 'User'}\\AppData\\Local'
-            : '');
-    return '$base${Platform.pathSeparator}hermes${Platform.pathSeparator}webui-bundled${Platform.pathSeparator}logs';
-  }
+  String get logDirectoryPath =>
+      '$_localAppData${Platform.pathSeparator}hermes${Platform.pathSeparator}webui-bundled${Platform.pathSeparator}logs';
 
   @override
   String get logFilePath =>
@@ -202,6 +212,37 @@ class DefaultSidecarFileSystem implements SidecarFileSystem {
   }
 }
 
+/// [SidecarFileSystem] 的 Agent 目录扩展能力。
+extension SidecarFileSystemAgentExtension on SidecarFileSystem {
+  /// 获取 Hermes Agent 安装根目录（`%LOCALAPPDATA%\hermes\hermes-agent`）。
+  String get hermesAgentDir {
+    final fs = this;
+    if (fs is DefaultSidecarFileSystem) {
+      return fs.hermesAgentDir;
+    }
+    try {
+      final dynamic dynamicFs = fs;
+      final dynamic custom = dynamicFs.hermesAgentDir;
+      if (custom is String && custom.isNotEmpty) {
+        return custom;
+      }
+    } catch (_) {}
+    final logDir = fs.logDirectoryPath;
+    final sep = Platform.pathSeparator;
+    final hermesIdx = logDir.lastIndexOf('${sep}hermes$sep');
+    if (hermesIdx != -1) {
+      final base = logDir.substring(0, hermesIdx);
+      return '$base${sep}hermes${sep}hermes-agent';
+    }
+    final base =
+        Platform.environment['LOCALAPPDATA'] ??
+        (Platform.isWindows
+            ? 'C:\\Users\\${Platform.environment['USERNAME'] ?? 'User'}\\AppData\\Local'
+            : '');
+    return '$base${sep}hermes${sep}hermes-agent';
+  }
+}
+
 /// WebUI Sidecar 服务接口（生命周期与状态核心）。
 abstract interface class WebuiSidecarService {
   /// 启动内置 WebUI 服务（幂等：已 running 直接返回；读取最新配置）。
@@ -237,7 +278,8 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
     this.takeoverInterval = const Duration(seconds: 5),
     this.stopGracePeriod = const Duration(seconds: 3),
     BackoffCalculator? backoffCalculator,
-  })  : _backoffCalculator = backoffCalculator ?? _defaultBackoffCalculator;
+    this.customAgentDir,
+  }) : _backoffCalculator = backoffCalculator ?? _defaultBackoffCalculator;
 
   final SidecarConfig Function() _getConfig;
 
@@ -246,6 +288,33 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
 
   /// 文件系统与路径适配器。
   final SidecarFileSystem fileSystem;
+
+  /// 自定义 Agent 根目录（测试注入用）。
+  final String? customAgentDir;
+
+  /// 获取当前生效的 Agent 根目录。
+  String get agentDir => customAgentDir ?? fileSystem.hermesAgentDir;
+
+  /// 探测并解析用于启动 WebUI 的 Python 解释器路径。
+  ///
+  /// 优先级（方案 B′）：
+  /// 1. `%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\python.exe` 存在 → 优先使用（自带完整 agent 运行环境）；
+  /// 2. `%LOCALAPPDATA%\hermes\hermes-agent\.venv\Scripts\python.exe` 存在 → 次选使用；
+  /// 3. 都不存在 → 兜底使用内置包 embedded python（`<bundleDir>\python\python.exe`）。
+  String resolvePythonPath([String? bundleDir]) {
+    final root = bundleDir ?? fileSystem.resolveBundleDir();
+    final targetAgentDir = agentDir;
+    final sep = Platform.pathSeparator;
+    final venvPy = '$targetAgentDir${sep}venv${sep}Scripts${sep}python.exe';
+    if (fileSystem.fileExists(venvPy)) {
+      return venvPy;
+    }
+    final dotVenvPy = '$targetAgentDir$sep.venv${sep}Scripts${sep}python.exe';
+    if (fileSystem.fileExists(dotVenvPy)) {
+      return dotVenvPy;
+    }
+    return '$root${sep}python${sep}python.exe';
+  }
 
   /// 健康检查探测器。
   final HealthChecker healthChecker;
@@ -330,11 +399,13 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
   Future<void> _performStart({bool isSelfHealing = false}) async {
     // 跨平台检查：仅 Windows 平台拉起进程
     if (!fileSystem.isWindows) {
-      _updateState(const SidecarState(
-        status: SidecarStatus.failed,
-        reason: SidecarFailureReason.startFailed,
-        detail: 'Built-in WebUI sidecar is only supported on Windows',
-      ));
+      _updateState(
+        const SidecarState(
+          status: SidecarStatus.failed,
+          reason: SidecarFailureReason.startFailed,
+          detail: 'Built-in WebUI sidecar is only supported on Windows',
+        ),
+      );
       return;
     }
 
@@ -342,11 +413,13 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
 
     // 内置包目录探测
     if (!fileSystem.isBundleAvailable()) {
-      _updateState(const SidecarState(
-        status: SidecarStatus.failed,
-        reason: SidecarFailureReason.missingBundle,
-        detail: 'WebUI bundle dependencies not found',
-      ));
+      _updateState(
+        const SidecarState(
+          status: SidecarStatus.failed,
+          reason: SidecarFailureReason.missingBundle,
+          detail: 'WebUI bundle dependencies not found',
+        ),
+      );
       return;
     }
 
@@ -370,21 +443,25 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
         _isTakeover = true;
         _currentProcess = null;
         _consecutiveFailures = 0;
-        _updateState(const SidecarState(
-          status: SidecarStatus.running,
-          reason: SidecarFailureReason.none,
-          pid: null,
-          detail: 'Takeover mode',
-        ));
+        _updateState(
+          const SidecarState(
+            status: SidecarStatus.running,
+            reason: SidecarFailureReason.none,
+            pid: null,
+            detail: 'Takeover mode',
+          ),
+        );
         _startWatchdog();
         return;
       } else {
         // 端口被占且非健康 WebUI 服务，报错且不自动换端口
-        _updateState(SidecarState(
-          status: SidecarStatus.failed,
-          reason: SidecarFailureReason.portOccupied,
-          detail: 'Port $port is already occupied by an unrecognized service',
-        ));
+        _updateState(
+          SidecarState(
+            status: SidecarStatus.failed,
+            reason: SidecarFailureReason.portOccupied,
+            detail: 'Port $port is already occupied by an unrecognized service',
+          ),
+        );
         if (isSelfHealing) {
           await _triggerSelfHealing('Port $port occupied during restart');
         }
@@ -395,14 +472,16 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
     // 端口空闲，进入启动子进程阶段
     _isTakeover = false;
     _isStopping = false;
-    _updateState(const SidecarState(
-      status: SidecarStatus.starting,
-      reason: SidecarFailureReason.none,
-    ));
+    _updateState(
+      const SidecarState(
+        status: SidecarStatus.starting,
+        reason: SidecarFailureReason.none,
+      ),
+    );
 
     final bundleDir = fileSystem.resolveBundleDir();
-    final pyPath =
-        '$bundleDir${Platform.pathSeparator}python${Platform.pathSeparator}python.exe';
+    final targetAgentDir = agentDir;
+    final pyPath = resolvePythonPath(bundleDir);
     final serverPath =
         '$bundleDir${Platform.pathSeparator}server${Platform.pathSeparator}server.py';
 
@@ -411,6 +490,7 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
       'HERMES_WEBUI_PORT': config.port.toString(),
       'HERMES_WEBUI_PASSWORD': config.password,
       'PYTHONDONTWRITEBYTECODE': '1',
+      'HERMES_WEBUI_AGENT_DIR': targetAgentDir,
     };
 
     Process process;
@@ -422,11 +502,13 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
         environment: env,
       );
     } catch (e) {
-      _updateState(SidecarState(
-        status: SidecarStatus.failed,
-        reason: SidecarFailureReason.startFailed,
-        detail: 'Failed to start WebUI child process: $e',
-      ));
+      _updateState(
+        SidecarState(
+          status: SidecarStatus.failed,
+          reason: SidecarFailureReason.startFailed,
+          detail: 'Failed to start WebUI child process: $e',
+        ),
+      );
       if (isSelfHealing) {
         await _triggerSelfHealing('Process start exception: $e');
       }
@@ -434,11 +516,13 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
     }
 
     _currentProcess = process;
-    _updateState(SidecarState(
-      status: SidecarStatus.starting,
-      reason: SidecarFailureReason.none,
-      pid: process.pid,
-    ));
+    _updateState(
+      SidecarState(
+        status: SidecarStatus.starting,
+        reason: SidecarFailureReason.none,
+        pid: process.pid,
+      ),
+    );
 
     // 启动日志 tee
     _pipeLogs(process, config.password);
@@ -459,11 +543,13 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
 
     if (!healthOk) {
       final pid = process.pid;
-      _updateState(const SidecarState(
-        status: SidecarStatus.failed,
-        reason: SidecarFailureReason.healthTimeout,
-        detail: 'Health check timed out after 30 seconds',
-      ));
+      _updateState(
+        const SidecarState(
+          status: SidecarStatus.failed,
+          reason: SidecarFailureReason.healthTimeout,
+          detail: 'Health check timed out after 30 seconds',
+        ),
+      );
       await _killProcessTree(pid, process);
       _currentProcess = null;
 
@@ -475,11 +561,13 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
 
     // 健康确认成功，进入 running 态并激活 watchdog
     _consecutiveFailures = 0;
-    _updateState(SidecarState(
-      status: SidecarStatus.running,
-      reason: SidecarFailureReason.none,
-      pid: process.pid,
-    ));
+    _updateState(
+      SidecarState(
+        status: SidecarStatus.running,
+        reason: SidecarFailureReason.none,
+        pid: process.pid,
+      ),
+    );
     _startWatchdog();
   }
 
@@ -488,15 +576,15 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .listen((line) {
-      unawaited(_writeLogLine(line, password));
-    });
+          unawaited(_writeLogLine(line, password));
+        });
 
     process.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .listen((line) {
-      unawaited(_writeLogLine(line, password));
-    });
+          unawaited(_writeLogLine(line, password));
+        });
   }
 
   Future<void> _writeLogLine(String line, String password) async {
@@ -529,8 +617,9 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
         }
 
         final config = _getConfig();
-        final connectHost =
-            config.host == '0.0.0.0' ? '127.0.0.1' : config.host;
+        final connectHost = config.host == '0.0.0.0'
+            ? '127.0.0.1'
+            : config.host;
         final healthUrl = 'http://$connectHost:${config.port}/health';
         final isHealthy = await healthChecker.checkHealth(healthUrl);
 
@@ -552,9 +641,7 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
         proc.exitCode.then((code) {
           if (_isStopping || _currentProcess != proc) return;
           unawaited(
-            _triggerSelfHealing(
-              'Process exited unexpectedly with code $code',
-            ),
+            _triggerSelfHealing('Process exited unexpectedly with code $code'),
           );
         }),
       );
@@ -566,23 +653,27 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
 
     _consecutiveFailures++;
     if (_consecutiveFailures >= maxConsecutiveFailures) {
-      _updateState(SidecarState(
-        status: SidecarStatus.failed,
-        reason: SidecarFailureReason.startFailed,
-        detail:
-            'Auto-healing stopped: consecutive failures reached limit ($maxConsecutiveFailures). Last error: $reason',
-      ));
+      _updateState(
+        SidecarState(
+          status: SidecarStatus.failed,
+          reason: SidecarFailureReason.startFailed,
+          detail:
+              'Auto-healing stopped: consecutive failures reached limit ($maxConsecutiveFailures). Last error: $reason',
+        ),
+      );
       _currentProcess = null;
       return;
     }
 
     final delay = _backoffCalculator(_consecutiveFailures);
 
-    _updateState(SidecarState(
-      status: SidecarStatus.running,
-      reason: SidecarFailureReason.none,
-      detail: 'restarting (attempt $_consecutiveFailures)',
-    ));
+    _updateState(
+      SidecarState(
+        status: SidecarStatus.running,
+        reason: SidecarFailureReason.none,
+        detail: 'restarting (attempt $_consecutiveFailures)',
+      ),
+    );
 
     await Future<void>.delayed(delay);
     if (_isStopping) return;
@@ -616,10 +707,12 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
       await _killProcessTree(proc.pid, proc);
     }
 
-    _updateState(const SidecarState(
-      status: SidecarStatus.stopped,
-      reason: SidecarFailureReason.none,
-    ));
+    _updateState(
+      const SidecarState(
+        status: SidecarStatus.stopped,
+        reason: SidecarFailureReason.none,
+      ),
+    );
     _isStopping = false;
   }
 
@@ -642,10 +735,12 @@ class DefaultWebuiSidecarService implements WebuiSidecarService {
 
     if (!exitedCleanly) {
       try {
-        await processExecutor.run(
-          'taskkill',
-          ['/T', '/F', '/PID', pid.toString()],
-        );
+        await processExecutor.run('taskkill', [
+          '/T',
+          '/F',
+          '/PID',
+          pid.toString(),
+        ]);
       } catch (_) {
         // 忽略 taskkill 失败异常
       }
