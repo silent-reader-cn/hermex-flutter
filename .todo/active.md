@@ -11,6 +11,8 @@
 
 ---
 
+---
+
 ### #71 [P0 方案已定 B′ · 未开工] 内置 WebUI sidecar 缺 agent 运行依赖，全新安装第一条消息必失败
 - 位置：`lib/features/webui_sidecar/webui_sidecar_service.dart`（解释器选择，现固定 `webui\python\python.exe`）；根因侧 `scripts/packaging/build_webui_bundle.ps1`（Step 3 只预装 pyyaml/cryptography）；消费方 `D:/hermes-webui api/streaming.py:616 AIAgent = get_ai_agent_class()`（进程内 import hermes-agent run_agent）
 - 复现（2026-09-06 E2E 实证，报告 `build/reports/win-installer-e2e-20260905/REPORT.md`）：全新装 0.1.23 → 引导页一键「启动并连接」全通（起服/登录/会话列表）→ 发第一条消息 → 红条「AIAgent not available — check that hermes-agent is on sys.path」；截图 27/28
@@ -35,11 +37,15 @@
 
 ---
 
+---
+
 ### #72 [P2 未修复] App 冷启动 sidecar 未就绪窗口期弹模态「操作失败·离线缓存」
 - 位置：启动链 sidecar 拉起（`webui_sidecar_service` start 异步）与会话列表首刷（`desktop_lifecycle_observer` / connections 激活）时序竞争
 - 复现（E2E 实证）：已配置内置连接后重启 hermes_ui.exe → 首帧会话列表请求打到尚未 LISTENING 的 :8787 → 中央模态「操作失败 离线缓存：当前显示最近缓存的会话」需手点「好」；数秒后 sidecar 就绪列表自动恢复（截图 20/24）
 - 现状 vs 预期：现状=新用户每次冷启动见红色报错弹窗；预期=内置连接冷启动静默宽限（3~5s 轮询 health）或降级为轻量 toast，就绪后自动刷新
 - 验收：杀 app 重启 ×3 无模态报错弹窗；手动断网场景离线提示仍可见（不吞真错误）；回归单测覆盖宽限逻辑
+
+---
 
 ---
 
@@ -59,6 +65,8 @@
 
 ---
 
+---
+
 ### #74 [P2 未修复·未开工] PC 桌面滚轮向上滚动立即被拉回底部：手势状态机无鼠标滚轮分支（只适配了触摸屏）
 - 位置：`lib/features/chat/widgets/chat_message_list.dart` 手势状态机 `NotificationListener<ScrollNotification>`（:1972-2031）+ 跟随执行器三处（streamingScrollTrigger 监听 :424-432、`_onMetricsChanged` :590-612、`_onScroll` 自动跟底分支 :644-647）+ `_nearBottomThreshold = 80`（:152）+ `_dragSensitivityThreshold = 8`（:294）
 - 复现（2026-09-06 主人真机反馈，Windows 桌面宽屏）：底部跟随开启（live 流式中或刚发送）→ 鼠标滚轮向上滚（小幅/慢滚必现）→ 视口立即被拉回底部，无法离底阅读；触摸屏拖动正常（已有 8px 阈值适配）
@@ -72,11 +80,3 @@
 - 备注：主人指示与 #73 同批先落盘不修复；#56 离底阅读锚点抖动防护（a64d488）与本条正交，取消跟随瞬间 `_readingAnchor` 由 `_resetAnchorStabilityState()` 既有链路清理
 
 ---
-
-### #75 [P3 未修复·未开工] 宽屏侧栏「记忆」入口图标与收藏提示词撞脸（同用 bookmark），换专属图标
-- 位置：`lib/app/shell/sidebar_utility_toolbar.dart:67`（宽屏侧栏顶部入口 memory `CupertinoIcons.bookmark`）+ `lib/features/session_list/session_list_utility_rows.dart:112`（窄屏工具行同款，文档注释 :17 同步）
-- 复现：宽屏侧栏看「记忆」图标 = 聊天输入栏收藏提示词按钮（chat_input_bar.dart:704/1023 均为 bookmark）一模一样，认知混淆
-- 现状 vs 预期：现状 = 两个不相关功能共用同一图标；预期 = 记忆入口换语义专属图标
-- 修复：memory 图标 bookmark → `CupertinoIcons.book`（记忆库语义，icons.dart:123 框架实存；全仓 grep 零占用，与 bookmark 视觉差异明显；备选 `rosette` :7850 亦零占用，主人若不喜欢可一行换回）；窄屏工具行同步改保持两端一致（窄屏下拉菜单纯文字无图标不涉及）；tool_call_card 的 mem0_delete=bookmark（:587）与收藏提示词属正常语义不动
-- 验收：宽屏侧栏与窄屏工具行记忆图标不再是 bookmark；settings 可见性测试若断言图标需同步；金照若受影响 --update-goldens；真机目测两处入口新图标生效
-- 备注：2026-09-06 主人 OOB 追加；与 #71-#74 同批扇出
