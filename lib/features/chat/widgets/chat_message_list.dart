@@ -353,6 +353,26 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
   bool get initialPositioned => _initialPositioned;
 
   @visibleForTesting
+  double get dragDisplacement => _dragDisplacement;
+
+  @visibleForTesting
+  bool get dragExceededThreshold => _dragExceededThreshold;
+
+  @visibleForTesting
+  bool get isGestureActive => _isGestureActive;
+
+  @visibleForTesting
+  bool get isProgrammaticScrolling => _isProgrammaticScrolling;
+
+  /// 是否正处于程序化滚动在途阶段（防止程序化位移误判为鼠标滚轮，#74）。
+  bool get _isProgrammaticScrolling =>
+      _isAnimatingToBottom ||
+      _isOutlineJumping ||
+      _jumpSettling ||
+      _restoringOlderPosition ||
+      _initialPositioning;
+
+  @visibleForTesting
   int get pinnedTranscriptCount => _pinnedTranscriptCount;
 
   @visibleForTesting
@@ -426,7 +446,10 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
           .select((s) => s.streamingScrollTrigger),
       (_, _) {
         if (!mounted) return;
-        if (_nearBottom && !_userHasScrolled && !_isUserInteracting) {
+        if (_nearBottom &&
+            !_userHasScrolled &&
+            !_isUserInteracting &&
+            _dragDisplacement >= 0) {
           _scrollToBottom(animated: false);
         }
       },
@@ -443,6 +466,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
           _readingAnchor = null;
           _resetAnchorStabilityState();
           _pinnedTranscriptCount = 0;
+          _dragDisplacement = 0.0;
+          _dragExceededThreshold = false;
         } else if (next == ChatPhase.streaming) {
           if (_justSent ||
               (_nearBottom && !_userHasScrolled) ||
@@ -453,6 +478,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
             _readingAnchor = null;
             _resetAnchorStabilityState();
             _pinnedTranscriptCount = 0;
+            _dragDisplacement = 0.0;
+            _dragExceededThreshold = false;
           }
         }
       },
@@ -509,7 +536,10 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
             .select((s) => s.streamingScrollTrigger),
         (_, _) {
           if (!mounted) return;
-          if (_nearBottom && !_userHasScrolled && !_isUserInteracting) {
+          if (_nearBottom &&
+              !_userHasScrolled &&
+              !_isUserInteracting &&
+              _dragDisplacement >= 0) {
             _scrollToBottom(animated: false);
           }
         },
@@ -524,6 +554,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
             _nearBottom = true;
             _readingAnchor = null;
             _pinnedTranscriptCount = 0;
+            _dragDisplacement = 0.0;
+            _dragExceededThreshold = false;
           } else if (next == ChatPhase.streaming) {
             if (_justSent ||
                 (_nearBottom && !_userHasScrolled) ||
@@ -534,6 +566,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
               _readingAnchor = null;
               _resetAnchorStabilityState();
               _pinnedTranscriptCount = 0;
+              _dragDisplacement = 0.0;
+              _dragExceededThreshold = false;
             }
           }
         },
@@ -593,6 +627,7 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
     if (notification.metrics.axis != Axis.vertical) return false;
     if (!_nearBottom ||
         _userHasScrolled ||
+        _dragDisplacement < 0 ||
         !_initialPositioned ||
         _positioningActive ||
         _restoringOlderPosition ||
@@ -632,6 +667,10 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
           _resetAnchorStabilityState();
           _pinnedTranscriptCount = 0;
           _nearBottom = true;
+          if (wasScrolled || wasNotNear || distFromBottom <= 1.0) {
+            _dragDisplacement = 0.0;
+            _dragExceededThreshold = false;
+          }
           if ((wasScrolled || wasNotNear) && mounted) {
             setState(() {});
           }
@@ -641,7 +680,9 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
         // 任何非触摸手势（新消息到达、键盘/输入栏高度挤压、窗口 resize、程序滚动等）
         // 一律不得置 _userHasScrolled = true；跟随状态的取消与判定全部交由
         // 手势状态机（及大纲跳转/高亮定位等主动导航）处理。
-        if (!_isUserInteracting && !_userHasScrolled) {
+        if (!_isUserInteracting &&
+            !_userHasScrolled &&
+            _dragDisplacement >= 0) {
           // 非用户交互且未主动离底：由图片异步加载、未知高度条目布局撑高或 extent 变化引起。
           // 保持 _nearBottom = true，触发自动跟底，绝不打断进入时的底部跟随。
           _scrollToBottom(animated: false);
@@ -1060,6 +1101,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
     _userHasScrolled = false;
     _readingAnchor = null;
     _pinnedTranscriptCount = 0;
+    _dragDisplacement = 0.0;
+    _dragExceededThreshold = false;
     if (mounted) setState(() {});
   }
 
@@ -1086,6 +1129,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
                 _readingAnchor = null;
                 _resetAnchorStabilityState();
                 _pinnedTranscriptCount = 0;
+                _dragDisplacement = 0.0;
+                _dragExceededThreshold = false;
                 _settleJumpToBottom(attempts: 0);
               }
             }),
@@ -1113,7 +1158,12 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
   /// 收敛条件 = 跳后一帧 extent 不再增长（pixels 已贴住 maxScrollExtent）。
   void _settleJumpToBottom({required int attempts}) {
     if (_jumpSettling || !mounted || !_controller.hasClients) return;
-    if (_userHasScrolled || !_nearBottom || _isUserInteracting) return;
+    if (_userHasScrolled ||
+        !_nearBottom ||
+        _isUserInteracting ||
+        _dragDisplacement < 0) {
+      return;
+    }
     _jumpSettling = true;
     final generation = _layoutGeneration;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1123,7 +1173,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
           _isAnimatingToBottom ||
           _userHasScrolled ||
           !_nearBottom ||
-          _isUserInteracting) {
+          _isUserInteracting ||
+          _dragDisplacement < 0) {
         _jumpSettling = false;
         return;
       }
@@ -1152,7 +1203,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
             _isAnimatingToBottom ||
             _userHasScrolled ||
             !_nearBottom ||
-            _isUserInteracting) {
+            _isUserInteracting ||
+            _dragDisplacement < 0) {
           _jumpSettling = false;
           return;
         }
@@ -1656,6 +1708,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
       _readingAnchor = null;
       _resetAnchorStabilityState();
       _pinnedTranscriptCount = 0;
+      _dragDisplacement = 0.0;
+      _dragExceededThreshold = false;
     }
 
     final phaseChanged = _lastPhase != phase;
@@ -1990,7 +2044,16 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
                   _isUserInteracting = true;
                 }
               } else if (notification is ScrollUpdateNotification) {
-                if (notification.dragDetails != null || _isGestureActive) {
+                final isGesture =
+                    notification.dragDetails != null || _isGestureActive;
+                final isWheelUp =
+                    !_isProgrammaticScrolling &&
+                    notification.scrollDelta != null &&
+                    notification.dragDetails == null &&
+                    !_isGestureActive &&
+                    notification.scrollDelta! < 0;
+
+                if (isGesture || isWheelUp) {
                   _isUserInteracting = true;
                   final stepDelta =
                       (notification.scrollDelta != null &&
@@ -2002,7 +2065,7 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
                   if (!_dragExceededThreshold &&
                       _dragDisplacement.abs() >= _dragSensitivityThreshold) {
                     _dragExceededThreshold = true;
-                    // 拖动开始超过 8px 敏感阈值即置取消（解锁自由滚动，不滚到离底不算用户离开）
+                    // 拖动/滚轮开始超过 8px 敏感阈值即置取消（解锁自由滚动，不滚到离底不算用户离开，#41/#74）
                     if (_initialPositioned &&
                         !_initialPositioning &&
                         !_restoringOlderPosition) {
@@ -2209,6 +2272,8 @@ class ChatMessageListState extends ConsumerState<ChatMessageList> {
                           _readingAnchor = null;
                           _resetAnchorStabilityState();
                           _pinnedTranscriptCount = 0;
+                          _dragDisplacement = 0.0;
+                          _dragExceededThreshold = false;
                         });
                         _scrollToBottom(animated: true);
                       },
