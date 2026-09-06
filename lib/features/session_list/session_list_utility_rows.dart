@@ -14,7 +14,7 @@ import 'session_entry_visibility.dart';
 /// 3. 工作区 (Workspaces) → /workspaces (CupertinoIcons.folder, 对齐 LucideFolder)
 /// 4. 技能 (Skills) → /skills (CupertinoIcons.hammer, 对齐 LucideHammer)
 /// 5. 统计 (Insights) → /insights (CupertinoIcons.chart_bar_square, 对齐 LucideChartColumnIncreasing)
-/// 6. 记忆 (Memory) → /memory (CupertinoIcons.bookmark)
+/// 6. 记忆 (Memory) → /memory (CupertinoIcons.book，#75 与收藏提示词 bookmark 区分)
 /// 7. 下载 (Downloads) → /downloads (CupertinoIcons.arrow_down_circle)
 ///
 /// 视觉采用纯 Cupertino 风格，支持深浅色自适应及 VoiceOver 语义与触觉反馈。
@@ -109,7 +109,8 @@ class SessionListUtilityRows extends ConsumerWidget {
         _buildUtilityItem(
           context,
           key: const ValueKey('session-list-utility-memory'),
-          icon: CupertinoIcons.bookmark,
+          // #75：与宽屏侧栏同步，bookmark 撞脸收藏提示词，改 book。
+          icon: CupertinoIcons.book,
           label: l10n.memory,
           route: '/memory',
           customCallback: onTapMemory,

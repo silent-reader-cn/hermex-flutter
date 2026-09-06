@@ -64,7 +64,8 @@ class SidebarUtilityToolbar extends ConsumerWidget {
     _UtilityItem(
       id: 'memory',
       path: '/memory',
-      icon: CupertinoIcons.bookmark,
+      // #75：bookmark 与收藏提示词按钮撞脸，记忆入口改用 book（记忆库语义）。
+      icon: CupertinoIcons.book,
       getTitle: (l10n) => l10n.memoryTitle,
     ),
     _UtilityItem(
