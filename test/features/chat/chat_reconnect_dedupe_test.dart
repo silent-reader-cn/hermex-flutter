@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hermes_ui/core/api/sse_client.dart';
@@ -14,6 +15,7 @@ import 'package:hermes_ui/core/models/session.dart';
 import 'package:hermes_ui/features/chat/chat_providers.dart';
 import 'package:hermes_ui/features/chat/chat_state.dart';
 import 'package:hermes_ui/features/chat/chat_models.dart';
+import 'package:hermes_ui/features/notifications/notification_providers.dart';
 
 import '../../helpers/fake_chat_api.dart';
 import '../../helpers/in_memory_secure_storage.dart';
@@ -450,6 +452,99 @@ void main() {
       });
     });
   });
+
+  group('SSE 订阅连接泄漏防御（TASK #73 _connectStream 入口先 stopStream）', () {
+    test('_connectStream 入口先 stopStream，重连后旧事件回调不再收到新事件', () {
+      fakeAsync((async) {
+        final api = _DisconnectTrackingChatApi();
+        api.statusResponse = const ChatStreamStatusResponse(active: true);
+        final clock = _FakeClock();
+        final container = _buildContainer(api, clock);
+        final controller = container.read(chatControllerProvider('').notifier);
+
+        unawaited(controller.send('hi'));
+        async.flushMicrotasks();
+        expect(api.startStreamCalls, 1);
+        expect(api.stopStreamCalls, 0);
+
+        // 首次连接接收 token 'A'
+        api.emitToCurrent(const TokenSseEvent('A'));
+        async.elapse(const Duration(milliseconds: 100));
+
+        var state = container.read(chatControllerProvider(''));
+        final streamingId = state.stream.streamingAssistantMessageId;
+        expect(_messageContent(state, streamingId), 'A');
+
+        // 模拟后台切回前台（无 transport error，原 SSE 仍处于 active 连接态）
+        // 空窗 3s ≥ 探活阈值 2s，触发 _checkStatusAndReconnect -> _loadMessagesAndResume -> _connectStream
+        _setLifecycle(container, AppLifecycleState.paused);
+        clock.advance(const Duration(seconds: 3));
+        async.elapse(const Duration(seconds: 3));
+        _setLifecycle(container, AppLifecycleState.resumed);
+        async.flushMicrotasks();
+
+        // 验证：_connectStream 入口先调用了 stopStream（修复前为 0 导致泄漏，修复后为 1），且启动了新连接
+        expect(api.stopStreamCalls, 1);
+        expect(api.startStreamCalls, 2);
+
+        // 旧连接尝试再推送事件（模拟泄漏连接残留在后台继续推流）
+        // 因 stopStream 在重连时已切断旧连接回调，旧连接事件不再生效
+        api.emitToOldConnection(const TokenSseEvent('LEAKED'));
+        async.elapse(const Duration(milliseconds: 100));
+
+        state = container.read(chatControllerProvider(''));
+        expect(_messageContent(state, streamingId), 'A');
+
+        // 新连接正常推送后续 token 'B'
+        api.emitToCurrent(const TokenSseEvent('B'));
+        async.elapse(const Duration(milliseconds: 100));
+
+        state = container.read(chatControllerProvider(''));
+        expect(_messageContent(state, streamingId), 'AB');
+      });
+    });
+  });
+}
+
+class _DisconnectTrackingChatApi extends FakeChatApi {
+  void Function(SseEvent event)? _oldOnEvent;
+  void Function(SseEvent event)? _currentOnEvent;
+
+  @override
+  Future<void> startStream(
+    String streamId, {
+    int? replayAfterSeq,
+    required void Function(SseEvent event) onEvent,
+    void Function(String eventId)? onEventId,
+    required void Function(String message) onTransportError,
+    required void Function() onClosed,
+  }) async {
+    await super.startStream(
+      streamId,
+      replayAfterSeq: replayAfterSeq,
+      onEvent: onEvent,
+      onEventId: onEventId,
+      onTransportError: onTransportError,
+      onClosed: onClosed,
+    );
+    _oldOnEvent = _currentOnEvent;
+    _currentOnEvent = onEvent;
+  }
+
+  @override
+  void stopStream() {
+    super.stopStream();
+    _oldOnEvent = null;
+    _currentOnEvent = null;
+  }
+
+  void emitToCurrent(SseEvent event) {
+    _currentOnEvent?.call(event);
+  }
+
+  void emitToOldConnection(SseEvent event) {
+    _oldOnEvent?.call(event);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -520,4 +615,8 @@ ProviderContainer _buildContainer(
     container.dispose();
   });
   return container;
+}
+
+void _setLifecycle(ProviderContainer container, AppLifecycleState state) {
+  container.read(appLifecycleStateProvider.notifier).setState(state);
 }

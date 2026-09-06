@@ -32,6 +32,8 @@ void main() {
         const Duration(seconds: 25),
       );
       expect(config.statusPollCooldown, const Duration(seconds: 4));
+      expect(config.heartbeatInterval, const Duration(seconds: 5));
+      expect(config.transportFreshThreshold, const Duration(seconds: 10));
       expect(config.maxReconnectAttempts, 6);
       expect(config.reconnectBackoffDelays, const [
         Duration(seconds: 1),
@@ -198,7 +200,7 @@ void main() {
       });
     });
 
-    test('工具运行中 + 心跳假活：18s 触发 checking 探活（不受心跳假活阻断）', () {
+    test('工具运行中 + progress 陈旧超阈值 + _lastTransportActivity 距今 < 10s：不触发 status 轮询/强重连', () {
       fakeAsync((async) {
         final api = FakeChatApi();
         final clock = _FakeClock();
@@ -208,7 +210,7 @@ void main() {
         unawaited(controller.send('hi'));
         async.flushMicrotasks();
 
-        // 发射未完成工具事件（如读取文件）
+        // 发射未完成工具事件（如读取大文件/执行长后台命令）
         api.emit(
           const ToolStartedSseEvent(
             ToolStreamEvent(stableId: 'tool-read', name: 'read_file'),
@@ -216,69 +218,58 @@ void main() {
         );
         async.flushMicrotasks();
 
-        // 持续发送心跳维持传输活动（模拟假活）
-        for (var i = 0; i < 8; i++) {
+        // 持续发送心跳（每 2s 一次，距今 < 10s 门控有效）维持 30s
+        for (var i = 0; i < 15; i++) {
           clock.advance(const Duration(seconds: 2));
           async.elapse(const Duration(seconds: 2));
           api.emit(const HeartbeatSseEvent());
         }
+        async.flushMicrotasks();
 
-        // 16s 时：虽有心跳且工具未完成，但未满 18s 阈值，不探活
+        // 工具运行中且进度陈旧超 18s/25s 阈值，但心跳持续到达（transport fresh），
+        // 门控生效：不触发 status 轮询，不触发 force 强制重连（工具跑得慢 ≠ 连接死了）
         expect(api.statusCalls, 0);
-
-        // 推进到 18s（持续有心跳）
-        clock.advance(const Duration(seconds: 2));
-        async.elapse(const Duration(seconds: 2));
-        api.emit(const HeartbeatSseEvent());
-        async.flushMicrotasks();
-
-        // 达到 18s：突破心跳假活，触发 status 探活
-        expect(api.statusCalls, 1);
+        expect(api.startStreamCalls, 1);
       });
     });
 
-    test('工具运行中 + 心跳假活：18s 探活异常时立即触发 force 强制重连', () {
-      fakeAsync((async) {
-        final api = FakeChatApi();
-        api.statusError = NetworkException(NetworkExceptionKind.timedOut);
-        final clock = _FakeClock();
-        final container = _buildContainer(api, clock);
-        final controller = container.read(chatControllerProvider('').notifier);
+    test(
+      '工具运行中 + progress 陈旧超阈值 + transport 静默超阈值：仍触发 status 探活与强制重连（覆盖既有行为）',
+      () {
+        fakeAsync((async) {
+          final api = FakeChatApi();
+          api.statusError = NetworkException(NetworkExceptionKind.timedOut);
+          final clock = _FakeClock();
+          final container = _buildContainer(api, clock);
+          final controller = container.read(
+            chatControllerProvider('').notifier,
+          );
 
-        unawaited(controller.send('hi'));
-        async.flushMicrotasks();
-        expect(api.startStreamCalls, 1);
+          unawaited(controller.send('hi'));
+          async.flushMicrotasks();
+          expect(api.startStreamCalls, 1);
 
-        // 发射未完成工具事件
-        api.emit(
-          const ToolStartedSseEvent(
-            ToolStreamEvent(stableId: 'tool-read', name: 'read_file'),
-          ),
-        );
-        async.flushMicrotasks();
+          // 发射未完成工具事件
+          api.emit(
+            const ToolStartedSseEvent(
+              ToolStreamEvent(stableId: 'tool-read', name: 'read_file'),
+            ),
+          );
+          async.flushMicrotasks();
 
-        // 持续发送心跳维持传输活动至 17s
-        for (var i = 0; i < 8; i++) {
-          clock.advance(const Duration(seconds: 2));
-          async.elapse(const Duration(seconds: 2));
-          api.emit(const HeartbeatSseEvent());
-        }
-        async.flushMicrotasks();
-        expect(api.startStreamCalls, 1);
+          // 传输完全静默超 18s（心跳中断，距今 ≥ 10s 门控失效）
+          clock.advance(const Duration(seconds: 18));
+          async.elapse(const Duration(seconds: 18));
+          async.flushMicrotasks();
 
-        // 推进到 18s（持续有心跳）
-        clock.advance(const Duration(seconds: 2));
-        async.elapse(const Duration(seconds: 2));
-        api.emit(const HeartbeatSseEvent());
-        async.flushMicrotasks();
+          // 达到 18s 且 transport 不再 fresh：触发 status 探活；探活异常回退 force 强制重连
+          expect(api.statusCalls, 1);
+          expect(api.startStreamCalls, greaterThanOrEqualTo(2));
+        });
+      },
+    );
 
-        // 达到 18s：探活失败回退 force 强制重连
-        expect(api.statusCalls, 1);
-        expect(api.startStreamCalls, greaterThanOrEqualTo(2));
-      });
-    });
-
-    test('工具运行中 + 心跳假活：25s 触发强制重连（探活挂起未返回时 25s 必强制重连）', () {
+    test('工具运行中 + transport 静默超阈值且探活挂起：25s 触发强制重连（覆盖既有行为）', () {
       fakeAsync((async) {
         final api = FakeChatApi();
         // status 探活请求一直挂起（模拟服务端僵死无响应）
@@ -301,15 +292,11 @@ void main() {
         );
         async.flushMicrotasks();
 
-        // 持续 24s 发送心跳维持传输活跃
-        for (var i = 0; i < 12; i++) {
-          clock.advance(const Duration(seconds: 2));
-          async.elapse(const Duration(seconds: 2));
-          api.emit(const HeartbeatSseEvent());
-        }
+        // 传输完全静默推进到 24s（18s 时已触发 status 但挂起中）
+        clock.advance(const Duration(seconds: 24));
+        async.elapse(const Duration(seconds: 24));
         async.flushMicrotasks();
 
-        // 24s 时（18s/23s 已触发 status 但挂起中），未达到 25s 强制重连阈值
         expect(api.statusCalls, greaterThanOrEqualTo(1));
         expect(api.startStreamCalls, 1);
 
@@ -318,7 +305,7 @@ void main() {
         async.elapse(const Duration(seconds: 1));
         async.flushMicrotasks();
 
-        // 达到 25s：强制重连触发，不再卡死
+        // 达到 25s 且传输静默：强制重连触发
         expect(api.startStreamCalls, greaterThanOrEqualTo(2));
       });
     });

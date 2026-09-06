@@ -16,16 +16,17 @@ import 'chat_state.dart';
 const String kChatStatusLineKey = 'settings.chatStatusLine';
 
 /// 聊天状态指示行偏好设置 Provider（持久化到 shared_preferences，默认开启）。
-final chatStatusLineProvider =
-    NotifierProvider<ChatStatusLineController, bool>(
-      ChatStatusLineController.new,
-    );
+final chatStatusLineProvider = NotifierProvider<ChatStatusLineController, bool>(
+  ChatStatusLineController.new,
+);
 
 /// 聊天状态指示行控制器。
 class ChatStatusLineController extends Notifier<bool> {
   static const String keyChatStatusLine = kChatStatusLineKey;
 
-  static Future<bool> loadStatusLinePref({SharedPreferences? customPrefs}) async {
+  static Future<bool> loadStatusLinePref({
+    SharedPreferences? customPrefs,
+  }) async {
     try {
       final prefs = customPrefs ?? await SharedPreferences.getInstance();
       return prefs.getBool(keyChatStatusLine) ?? true;
@@ -77,6 +78,8 @@ class ChatWatchdogConfig {
     this.forceReconnectThreshold = const Duration(seconds: 18),
     this.forceReconnectWithRunningToolsThreshold = const Duration(seconds: 25),
     this.statusPollCooldown = const Duration(seconds: 4),
+    this.heartbeatInterval = const Duration(seconds: 5),
+    this.transportFreshThreshold = const Duration(seconds: 10),
     this.reconnectBackoffDelays = const [
       Duration(seconds: 1),
       Duration(seconds: 2),
@@ -105,6 +108,13 @@ class ChatWatchdogConfig {
 
   /// status 轮询冷却。
   final Duration statusPollCooldown;
+
+  /// 服务端心跳间隔（PROTOCOL_NOTES §2，缺省 5s）。
+  final Duration heartbeatInterval;
+
+  /// 传输保持活跃（fresh）的判定上限（默认取 [heartbeatInterval] * 2 = 10s）。
+  /// 在此窗口内持续收到心跳/帧，表明底层连接健康，工具长时间执行不应被误判为掉线。
+  final Duration transportFreshThreshold;
 
   /// 传输错误重连退避序列（建议 1s, 2s, 4s, 8s, 16s, 30s 封顶）。
   final List<Duration> reconnectBackoffDelays;

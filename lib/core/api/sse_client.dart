@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:meta/meta.dart';
 
 import '../models/approval.dart';
 import '../models/clarification.dart';
@@ -675,6 +676,7 @@ Future<void> connectSse({
     receiveTimeout: const Duration(days: 1),
     sendTimeout: connectTimeout,
     connectTimeout: connectTimeout,
+    cancelToken: cancelToken,
   );
 
   final Response<ResponseBody> response;
@@ -766,6 +768,7 @@ class SseClient {
     void Function(String message)? onTransportError,
     void Function()? onClosed,
   }) async {
+    _cancelToken?.cancel();
     _cancelToken = CancelToken();
     await connectSse(
       dio: dio,
@@ -802,6 +805,10 @@ class SseClient {
   }
 
   void stop() => _cancelToken?.cancel();
+
+  /// 供单测断言当前使用的 [CancelToken]（覆盖前 cancel 证据）。
+  @visibleForTesting
+  CancelToken? get cancelTokenForTesting => _cancelToken;
 }
 
 void _logSseEvent(SseEvent event) {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -201,7 +202,11 @@ void main() {
       );
       expect(event, isA<DoneSseEvent>());
       final done = (event as DoneSseEvent).event;
-      expect(done.usage, {'context_length': 8000, 'tps': 25.5, 'input_tokens': 100});
+      expect(done.usage, {
+        'context_length': 8000,
+        'tps': 25.5,
+        'input_tokens': 100,
+      });
       expect(done.session, {'session_id': 's1', 'title': '会话标题'});
       expect(done.usageSnapshot, isA<ContextWindowSnapshot>());
       expect(done.usageSnapshot?.contextLength, 8000);
@@ -382,10 +387,16 @@ void main() {
       ) as MeteringSseEvent;
       expect(metering.tps, isNull);
 
-      final malformedApproval = SseEventDecoder.decode('approval', 'garbage') as ApprovalPendingSseEvent;
+      final malformedApproval = SseEventDecoder.decode(
+        'approval',
+        'garbage',
+      ) as ApprovalPendingSseEvent;
       expect(malformedApproval.approval.pending, isNull);
 
-      final malformedClarify = SseEventDecoder.decode('clarify', 'not-json') as ClarificationPendingSseEvent;
+      final malformedClarify = SseEventDecoder.decode(
+        'clarify',
+        'not-json',
+      ) as ClarificationPendingSseEvent;
       expect(malformedClarify.clarification.pending, isNull);
 
       const malformedDoneEvent = DoneStreamEvent(
@@ -481,6 +492,58 @@ void main() {
       expect(errors, hasLength(1));
       expect(errors.single, contains('500'));
     });
+
+    test(
+      '同一 SseClient 连续两次 start，第一次请求在第二次 start 后处于 cancelled（防连接泄漏）',
+      () async {
+        final streamController = StreamController<Uint8List>();
+        final adapter = _RecordingAdapter(
+          responder: (_) => ResponseBody(
+            streamController.stream,
+            200,
+            headers: {
+              'content-type': ['text/event-stream'],
+            },
+          ),
+        );
+        final dio = Dio(BaseOptions(validateStatus: (_) => true));
+        dio.httpClientAdapter = adapter;
+        final client = SseClient(dio: dio, baseUrl: 'http://hermes.local:8787');
+
+        // 第一次启动
+        final firstStart = client.start(
+          Uri.parse('http://hermes.local:8787/stream?id=1'),
+          onEvent: (_) {},
+        );
+        await pumpEventQueue();
+
+        expect(adapter.requests, hasLength(1));
+        final firstCancelToken = adapter.requests[0].cancelToken;
+        expect(firstCancelToken, isNotNull);
+        expect(firstCancelToken!.isCancelled, isFalse);
+
+        // 第二次启动同一 client：必须 cancel 旧 token，防止旧连接残留
+        final secondStart = client.start(
+          Uri.parse('http://hermes.local:8787/stream?id=2'),
+          onEvent: (_) {},
+        );
+        await pumpEventQueue();
+
+        expect(firstCancelToken.isCancelled, isTrue);
+        expect(adapter.requests, hasLength(2));
+        final secondCancelToken = adapter.requests[1].cancelToken;
+        expect(secondCancelToken, isNotNull);
+        expect(secondCancelToken!.isCancelled, isFalse);
+        expect(client.cancelTokenForTesting, same(secondCancelToken));
+
+        client.stop();
+        expect(secondCancelToken.isCancelled, isTrue);
+
+        await firstStart;
+        await secondStart;
+        await streamController.close();
+      },
+    );
   });
 }
 

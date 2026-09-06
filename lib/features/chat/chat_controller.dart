@@ -1225,6 +1225,10 @@ class ChatController extends FamilyNotifier<ChatState, String> {
   }) {
     final api = _api;
     if (api == null) return;
+    if (_streamConnected || replayAfterSeq != null || fullReconnect) {
+      api.stopStream();
+      _streamConnected = false;
+    }
     final useReplay = replayAfterSeq != null || fullReconnect;
     final effectiveReplayAfterSeq =
         replayAfterSeq ??
@@ -1467,11 +1471,12 @@ class ChatController extends FamilyNotifier<ChatState, String> {
     );
     try {
       final keepalive = ref.read(backgroundKeepaliveServiceProvider);
-      unawaited(keepalive
-          .stopForegroundService()
-          // 停止失败仅诊断日志（K 修复规格：仅开关路径需回滚，见
-          // setBgForegroundServiceEnabled）；fire-and-forget 调用自吞。
-          .catchError((Object _) {}));
+      unawaited(
+        keepalive.stopForegroundService()
+        // 停止失败仅诊断日志（K 修复规格：仅开关路径需回滚，见
+        // setBgForegroundServiceEnabled）；fire-and-forget 调用自吞。
+        .catchError((Object _) {}),
+      );
       if (state.sessionId.isNotEmpty) {
         unawaited(keepalive.cancelOneOffPoll(state.sessionId));
       }
@@ -2782,11 +2787,12 @@ class ChatController extends FamilyNotifier<ChatState, String> {
     _markProgress();
     try {
       final keepalive = ref.read(backgroundKeepaliveServiceProvider);
-      unawaited(keepalive
-          .stopForegroundService()
-          // 停止失败仅诊断日志（K 修复规格：仅开关路径需回滚，见
-          // setBgForegroundServiceEnabled）；fire-and-forget 调用自吞。
-          .catchError((Object _) {}));
+      unawaited(
+        keepalive.stopForegroundService()
+        // 停止失败仅诊断日志（K 修复规格：仅开关路径需回滚，见
+        // setBgForegroundServiceEnabled）；fire-and-forget 调用自吞。
+        .catchError((Object _) {}),
+      );
       if (state.sessionId.isNotEmpty) {
         unawaited(keepalive.cancelOneOffPoll(state.sessionId));
       }
@@ -3182,12 +3188,17 @@ class ChatController extends FamilyNotifier<ChatState, String> {
     final lastTransport = _lastTransportActivity;
     final hasRunningTools = _hasRunningTools;
 
+    final isTransportFresh =
+        lastTransport != null &&
+        now.difference(lastTransport) < config.transportFreshThreshold;
+
     final isNormalStale =
         lastProgress != null &&
         now.difference(lastProgress) >= config.progressStaleThreshold &&
         lastTransport != null &&
         now.difference(lastTransport) >= config.transportStaleThreshold;
     final isToolProgressStale =
+        !isTransportFresh &&
         hasRunningTools &&
         lastProgress != null &&
         now.difference(lastProgress) >= config.forceReconnectThreshold;
@@ -3217,6 +3228,7 @@ class ChatController extends FamilyNotifier<ChatState, String> {
         lastTransport != null &&
         now.difference(lastTransport) >= forceThreshold;
     final isToolProgressForce =
+        !isTransportFresh &&
         hasRunningTools &&
         lastProgress != null &&
         now.difference(lastProgress) >=
