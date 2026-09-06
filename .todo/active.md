@@ -65,3 +65,21 @@
 
 ---
 
+
+### #71 [P0 未修复] 内置 WebUI sidecar 缺 agent 运行依赖，全新安装第一条消息必失败
+- 位置：`scripts/packaging/build_webui_bundle.ps1`（Step 3 只预装 pyyaml/cryptography）；消费方 `D:/hermes-webui api/streaming.py:616 AIAgent = get_ai_agent_class()`（进程内 import hermes-agent run_agent）
+- 复现（2026-09-06 E2E 实证，报告 `build/reports/win-installer-e2e-20260905/REPORT.md`）：全新装 0.1.23 → 引导页一键「启动并连接」全通（起服/登录/会话列表）→ 发第一条消息 → 红条「AIAgent not available — check that hermes-agent is on sys.path」；截图 27/28
+- 根因：聊天回合由 webui **进程内** import agent 的 run_agent，agent 需 dotenv 等全套第三方依赖；内置 embedded python 按 S4 零 pip 规格只装了 webui 自身两依赖，server.py 的 auto_install_agent_deps() 兜底在零 pip 环境注定失败（日志实证 `ModuleNotFoundError: No module named 'dotenv'`）
+- 现状 vs 预期：现状=内置模式只能读历史不能对话（对所有全新用户不可用）；预期=开箱即可发收消息
+- 修复方向（建议 A+B 双保险，待主人拍板）：A 构建期把 agent 运行时依赖（requirements 解析，纯 py+少量 wheel）预装进 site-packages 保持零 pip；B sidecar 启动注入 HERMES_WEBUI_AGENT_DIR 并探测本机 agent venv 的 site-packages 追加进 _pth/sys.path（版本一致，依赖 agent 已装——引导页已有缺失卡语义可接受）
+- 验收：全新安装（清 prefs + 删 Program Files\HermesUI + 无绕行补丁）→ 一键启动并连接 → 发中文消息 → 收到 agent 回复；`webui/python/python.exe -c "import dotenv"` 成功；零 pip 断言不回归
+
+---
+
+### #72 [P2 未修复] App 冷启动 sidecar 未就绪窗口期弹模态「操作失败·离线缓存」
+- 位置：启动链 sidecar 拉起（`webui_sidecar_service` start 异步）与会话列表首刷（`desktop_lifecycle_observer` / connections 激活）时序竞争
+- 复现（E2E 实证）：已配置内置连接后重启 hermes_ui.exe → 首帧会话列表请求打到尚未 LISTENING 的 :8787 → 中央模态「操作失败 离线缓存：当前显示最近缓存的会话」需手点「好」；数秒后 sidecar 就绪列表自动恢复（截图 20/24）
+- 现状 vs 预期：现状=新用户每次冷启动见红色报错弹窗；预期=内置连接冷启动静默宽限（3~5s 轮询 health）或降级为轻量 toast，就绪后自动刷新
+- 验收：杀 app 重启 ×3 无模态报错弹窗；手动断网场景离线提示仍可见（不吞真错误）；回归单测覆盖宽限逻辑
+
+---
