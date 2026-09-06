@@ -70,3 +70,13 @@
   - 恢复路径零改动：滚回底部走 `_onScroll` nearBottom 分支（:626-638，`distFromBottom <= 1.0` 恒可复位）+ 回底按钮（`showScrollToBottomButton`），与触摸语义一致
 - 验收：①widget 测试 `tester.sendEventToBinding(PointerScrollEvent(...))` 滚轮上滚累计 ≥8px → `_userHasScrolled=true`、下一条 token 事件不跳底（streamingScrollTrigger 不触发 jump）、回底按钮出现；②滚轮滚回底部 → 跟随恢复、下一条 token 正常跟底；③触摸拖动取消跟随的现有测试不回归（#41 语义不变）；④内容撑高型 ScrollUpdate（scrollDelta 为 null）不误判（现有 :1996-1999 分支天然排除）；⑤真机 Windows 复验：live 中滚轮上滚可离底阅读、右下角回底按钮可用
 - 备注：主人指示与 #73 同批先落盘不修复；#56 离底阅读锚点抖动防护（a64d488）与本条正交，取消跟随瞬间 `_readingAnchor` 由 `_resetAnchorStabilityState()` 既有链路清理
+
+---
+
+### #75 [P3 未修复·未开工] 宽屏侧栏「记忆」入口图标与收藏提示词撞脸（同用 bookmark），换专属图标
+- 位置：`lib/app/shell/sidebar_utility_toolbar.dart:67`（宽屏侧栏顶部入口 memory `CupertinoIcons.bookmark`）+ `lib/features/session_list/session_list_utility_rows.dart:112`（窄屏工具行同款，文档注释 :17 同步）
+- 复现：宽屏侧栏看「记忆」图标 = 聊天输入栏收藏提示词按钮（chat_input_bar.dart:704/1023 均为 bookmark）一模一样，认知混淆
+- 现状 vs 预期：现状 = 两个不相关功能共用同一图标；预期 = 记忆入口换语义专属图标
+- 修复：memory 图标 bookmark → `CupertinoIcons.archivebox`（记忆存档语义；候选框架实测存在 icons.dart:1666；全仓 grep 零占用；备选 `rosette` :7850 亦零占用，主人若不喜欢可一行换回）；窄屏工具行同步改保持两端一致（窄屏下拉菜单纯文字无图标不涉及）；tool_call_card 的 mem0_delete=bookmark（:587）与收藏提示词属正常语义不动
+- 验收：宽屏侧栏与窄屏工具行记忆图标不再是 bookmark；settings 可见性测试若断言图标需同步；金照若受影响 --update-goldens；真机目测两处入口新图标生效
+- 备注：2026-09-06 主人 OOB 追加；与 #71-#74 同批扇出
