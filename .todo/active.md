@@ -66,13 +66,23 @@
 ---
 
 
-### #71 [P0 未修复] 内置 WebUI sidecar 缺 agent 运行依赖，全新安装第一条消息必失败
-- 位置：`scripts/packaging/build_webui_bundle.ps1`（Step 3 只预装 pyyaml/cryptography）；消费方 `D:/hermes-webui api/streaming.py:616 AIAgent = get_ai_agent_class()`（进程内 import hermes-agent run_agent）
+### #71 [P0 方案已定 B′ · 未开工] 内置 WebUI sidecar 缺 agent 运行依赖，全新安装第一条消息必失败
+- 位置：`lib/features/webui_sidecar/webui_sidecar_service.dart`（解释器选择，现固定 `webui\python\python.exe`）；根因侧 `scripts/packaging/build_webui_bundle.ps1`（Step 3 只预装 pyyaml/cryptography）；消费方 `D:/hermes-webui api/streaming.py:616 AIAgent = get_ai_agent_class()`（进程内 import hermes-agent run_agent）
 - 复现（2026-09-06 E2E 实证，报告 `build/reports/win-installer-e2e-20260905/REPORT.md`）：全新装 0.1.23 → 引导页一键「启动并连接」全通（起服/登录/会话列表）→ 发第一条消息 → 红条「AIAgent not available — check that hermes-agent is on sys.path」；截图 27/28
 - 根因：聊天回合由 webui **进程内** import agent 的 run_agent，agent 需 dotenv 等全套第三方依赖；内置 embedded python 按 S4 零 pip 规格只装了 webui 自身两依赖，server.py 的 auto_install_agent_deps() 兜底在零 pip 环境注定失败（日志实证 `ModuleNotFoundError: No module named 'dotenv'`）
 - 现状 vs 预期：现状=内置模式只能读历史不能对话（对所有全新用户不可用）；预期=开箱即可发收消息
-- 修复方向（建议 A+B 双保险，待主人拍板）：A 构建期把 agent 运行时依赖（requirements 解析，纯 py+少量 wheel）预装进 site-packages 保持零 pip；B sidecar 启动注入 HERMES_WEBUI_AGENT_DIR 并探测本机 agent venv 的 site-packages 追加进 _pth/sys.path（版本一致，依赖 agent 已装——引导页已有缺失卡语义可接受）
-- 验收：全新安装（清 prefs + 删 Program Files\HermesUI + 无绕行补丁）→ 一键启动并连接 → 发中文消息 → 收到 agent 回复；`webui/python/python.exe -c "import dotenv"` 成功；零 pip 断言不回归
+- **修复方案（2026-09-06 主人过目定稿：B′——sidecar 优先用 agent venv 的解释器跑内置 server，embedded python 降级为兜底；A 方案否决）**：
+  - 否决 A 的实证：agent venv site-packages 实测 **1.75GB**，构建期全量预装 = 安装包 50MB→~1.8GB 且引入版本漂移；无 agent 的用户本来就聊不了天（引导页 agent 缺失卡已有引导），「纯离线自足」在当前产品语义下是伪需求
+  - B′ 决定性实证（2026-09-06）：① agent venv python 直接跑 `C:\Program Files\HermesUI\webui\server\server.py` → 起服成功、启动横幅 `agent dir : %LOCALAPPDATA%\hermes\hermes-agent [ok]`、`/api/system/health` 401（auth 开启即活）；② `from api.streaming import AIAgent` → `<class 'run_agent.AIAgent'>` 导入成功；③ venv 依赖 dotenv/aiohttp/yaml/cryptography 全齐（Python 3.11.15，与 server 只用标准库+2 轻依赖耦合无感）。优于原 B（embedded python + `_pth` 混插 venv site-packages 有 ABI/版本错配隐患）：换解释器=零混插，venv 本就是 agent 官方运行环境（gateway 同环境实证）
+  - 实现要点（`webui_sidecar_service.dart` 单点改动）：
+    1. 启动前探测解释器（纯 IO，走现有 fileSystem 注入缝可测）：`%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\python.exe` 存在 → 用之；再探 `…\.venv\Scripts\python.exe`；都没有 → 兜底 `webui\python\python.exe`
+    2. env 追加 `HERMES_WEBUI_AGENT_DIR=<agent 目录>`（显式指定，不靠 webui 多策略猜）；现有 4 个 env（HOST/PORT/PASSWORD/PYTHONDONTWRITEBYTECODE）不变
+    3. bundle 判定不变（仍用 `webui\server\server.py` 存在性判打包态）；server.py 路径、工作目录、日志 tee、watchdog、端口接管逻辑全部不动
+    4. 单测：三条探测分支（venv 命中 / .venv 命中 / 兜底 embedded）+ `HERMES_WEBUI_AGENT_DIR` 注入断言（现有 28 个 sidecar 单测框架直扩）
+    5. 文档：`docs/specs/webui-sidecar-packaging.md` §2 补「解释器选择」小节；打包脚本与 .iss 零改动（embedded python 仍随包分发作兜底）
+  - 边界：venv python 与 app 无版本耦合风险（server 轻依赖）；真要做「App 自带完整 agent+依赖」是另一量级决策，不塞进本修复
+- 验收：全新安装（清 prefs + 删 Program Files\HermesUI + **无绕行补丁**，即 `python311._pth` 保持出厂三行）→ 一键启动并连接 → 发中文消息 → 收到 agent 回复（进程列表可见 sidecar python.exe 路径在 agent venv 内）；模拟 venv 缺失（改名 venv 目录）→ 兜底 embedded 起服、历史可读、聊天报 AIAgent not available 属预期；零 pip 断言不回归；watchdog kill 重拉仍用同一探测结果
+- ⚠️ 取证遗留：当前安装目录 `C:\Program Files\HermesUI\webui\python\python311._pth` 尾部有本喵 E2E 加的 venv site-packages 绕行行，修复验收前须还原
 
 ---
 
