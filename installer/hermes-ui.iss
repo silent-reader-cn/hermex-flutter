@@ -33,8 +33,10 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
-; Disable default uninstall confirmation box; custom dialog with checkbox handles it
-ConfirmUninstall=no
+; NOTE: there is no such [Setup] directive as ConfirmUninstall in any Inno Setup
+; release (compiler rejects it). The uninstall confirmation is fully taken over
+; by InitializeUninstall() below, which shows a custom dialog with the
+; "also remove logs and WebUI state data" checkbox.
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -77,11 +79,10 @@ begin
     Exit;
   end;
 
-  ConfirmForm := CreateCustomForm();
-  ConfirmForm.ClientWidth := ScaleX(440);
-  ConfirmForm.ClientHeight := ScaleY(180);
+  // Inno Setup >= 6.5 changed the CreateCustomForm prototype: size is passed
+  // as arguments (client width, client height, keep size X, center on show).
+  ConfirmForm := CreateCustomForm(ScaleX(440), ScaleY(180), False, True);
   ConfirmForm.Caption := 'Uninstall ' + '{#MyAppName}';
-  ConfirmForm.Position := poScreenCenter;
 
   PromptLabel := TLabel.Create(ConfirmForm);
   PromptLabel.Parent := ConfirmForm;
